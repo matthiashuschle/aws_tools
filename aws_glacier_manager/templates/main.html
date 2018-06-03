@@ -1,0 +1,16 @@
+{% extends "content_placing.html" %}
+{% block body %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-2"></div>
+        <div class="col-md-8"><h1>moo</h1></div>
+        <div class="col-md-2"></div>
+    </div>
+    <div class="row">
+        <div class="col-md-2"></div>
+        <div class="col-md-8" id="content-abcdef"></div>
+        <div class="col-md-2"></div>
+    </div>
+</div>
+<content cid="abcdef">moo</content>
+{% endblock %}
