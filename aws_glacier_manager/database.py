@@ -14,17 +14,30 @@ class BackupLog:
             ('id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('name', 'TEXT NOT NULL')
         ])),
-        ('item', OrderedDict([
+        ('file', OrderedDict([
             ('id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('name', 'TEXT NOT NULL'),
+            ('path', 'TEXT NOT NULL'),
+            ('size', 'INTEGER NOT NULL'),
+            ('outdated', 'INTEGER DEFAULT 0'),
             ('fk_project_id', 'INTEGER')
+        ])),
+        ('chunk', OrderedDict([
+            ('id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
+            ('upload_id', 'TEXT'),
+            ('checksum', 'TEXT'),
+            ('start_offset', 'INTEGER NOT NULL'),
+            ('end_offset', 'INTEGER NOT NULL'),
+            ('fk_file_id', 'INTEGER')
         ])),
     ])
     TABLE_FK = {
-        'item': ('project', 'id')
+        'file': ('project', 'id'),
+        'chunk': ('file', 'id')
     }
 
-    def __init__(self, filename='backup_log.sqlite'):
+    def __init__(self, project, filename='backup_log.sqlite'):
+        self.project = project
         self.filename = filename
         self.init_db()
 
@@ -47,3 +60,15 @@ class BackupLog:
                     tablename,
                     ', '.join(elements)
                 ))
+
+    def add_file(self, recursive=True):
+        """ Add a file to the database. If it is a directory, descend. Should not follow symlinks to folders. """
+        pass
+
+    def get_files_for_upload(self):
+        """ Get list of stored files, for uploading, i.e. verify that they are unmodified and not uploaded yet."""
+        pass
+
+    def define_chunks(self, file):
+        """ Create chunk information for a file. """
+        pass
