@@ -26,8 +26,10 @@ class BackupLog:
             ('id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('upload_id', 'TEXT'),
             ('checksum', 'TEXT'),
+            ('signature', 'TEXT'),
             ('start_offset', 'INTEGER NOT NULL'),
-            ('end_offset', 'INTEGER NOT NULL'),
+            ('size', 'INTEGER NOT NULL'),
+            ('encrypted', 'INTEGER DEFAULT 0'),
             ('fk_file_id', 'INTEGER')
         ])),
     ])

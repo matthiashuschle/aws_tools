@@ -10,19 +10,24 @@ import nacl.encoding
 import nacl.signing
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.exceptions import InvalidSignature
 
 SYMKEY = 'symkey.bin'
 AUTHKEY = 'authkey.bin'
+CHUNK_SIZE = 16 * 1024
 
 
 def create_keys(out_path, replace=False):
-    os.makedirs(out_path, exist_ok=True)
+    if out_path:
+        os.makedirs(out_path, exist_ok=True)
     # encryption key
     key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+    auth_key = nacl.utils.random(size=64)
+    if not out_path:
+        return key, auth_key
     with open(os.path.join(out_path, SYMKEY), 'wb' if replace else 'xb') as f:
         f.write(key)
     # signature key
-    auth_key = nacl.utils.random(size=64)
     with open(os.path.join(out_path, AUTHKEY), 'wb' if replace else 'xb') as f:
         f.write(auth_key)
 
@@ -32,38 +37,100 @@ def _chunk_nonce(base, index):
     return int.to_bytes(int.from_bytes(base, byteorder='big') + index, length=size, byteorder='big')
 
 
-def _read_in_chunks(file_object, chunk_size=16 * 1024):
-    """Lazy function (generator) to read a file piece by piece.
-    Default chunk size: 16k."""
+class CryptoHandler:
+
+    def __init__(self, secret_key, auth_key):
+        self._secret_key = secret_key
+        self.secret_box = get_secret_box_from_key(secret_key)
+        self.auth_key = auth_key
+        self.last_signature = None
+
+    @property
+    def secret_key(self):
+        return self._secret_key
+
+    @secret_key.setter
+    def secret_key(self, val):
+        self._secret_key = val
+        self.secret_box = get_secret_box_from_key(val)
+
+    def get_auth_hmac(self):
+        return get_auth_hmac_from_key(self.auth_key)
+
+    def encrypt_stream(self, file_object, read_total=None):
+        auth_hmac = self.get_auth_hmac()
+        for chunk in encrypt_stream(self.secret_box, file_object, read_total=read_total):
+            auth_hmac.update(chunk)
+            yield chunk
+        self.last_signature = binascii.hexlify(auth_hmac.finalize())
+
+    def decrypt_stream(self, ):
+        pass
+
+
+def _read_in_chunks(file_object, chunk_size=None, read_total=None):
+    """ Generator to read a stream piece by piece with a given chunk size.
+    Total read size may be given. Only read() is used on the stream. """
+    chunk_size = chunk_size or CHUNK_SIZE
+    read_size = chunk_size
     index = 0
+    read_yet = 0
     while True:
-        data = file_object.read(chunk_size)
+        if read_total is not None:
+            read_size = min(read_total - read_yet, chunk_size)
+        data = file_object.read(read_size)
         if not data:
             break
         yield (data, index)
+        read_yet += read_size
         index += 1
+
+
+def get_secret_box_from_key(key):
+    return nacl.secret.SecretBox(key)
 
 
 def get_secret_box_from_file(keyfile=SYMKEY):
     with open(keyfile, 'rb') as f:
         key = f.read()
-    return nacl.secret.SecretBox(key)
+    return get_secret_box_from_key(key)
+
+
+def get_auth_hmac_from_key(auth_key):
+    return hmac.HMAC(auth_key, hashes.SHA512(), backend=default_backend())
 
 
 def get_auth_hmac_from_file(keyfile=AUTHKEY):
     with open(keyfile, 'rb') as f:
         auth_key = f.read()
-    return hmac.HMAC(auth_key, hashes.SHA512(), backend=default_backend())
+    return get_auth_hmac_from_key(auth_key)
 
 
-def encrypt_stream(secret_box, input_file_object):
+def encrypt_stream(secret_box, encrypted_file_object, read_total=None):
     nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
-    for chunk, index in _read_in_chunks(input_file_object, chunk_size=16 * 1024 - 40):
+    for chunk, index in _read_in_chunks(encrypted_file_object, chunk_size=CHUNK_SIZE - 40, read_total=read_total):
         enc = secret_box.encrypt(chunk, _chunk_nonce(nonce, index))
         yield enc
 
 
-def sign_output(auth_hmac, input_file_object):
-    for chunk, _ in _read_in_chunks(input_file_object):
+def sign_output(auth_hmac, input_file_object, read_total=None):
+    for chunk, _ in _read_in_chunks(input_file_object, read_total=read_total):
         auth_hmac.update(chunk)
     return binascii.hexlify(auth_hmac.finalize())
+
+
+def verify_stream(auth_hmac, file_object, signature, read_total=None):
+    sig_bytes = binascii.unhexlify(signature)
+    for chunk, _ in _read_in_chunks(file_object, read_total=read_total):
+        auth_hmac.update(chunk)
+    try:
+        auth_hmac.verify(sig_bytes)
+        return True
+    except InvalidSignature:
+        return False
+
+
+def decrypt_stream(secret_box, input_file_object, read_total=None):
+    for chunk, index in _read_in_chunks(input_file_object, read_total=read_total):
+        dec = secret_box.decrypt(chunk)
+        yield dec
