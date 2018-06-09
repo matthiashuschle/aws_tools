@@ -57,15 +57,31 @@ class CryptoHandler:
     def get_auth_hmac(self):
         return get_auth_hmac_from_key(self.auth_key)
 
-    def encrypt_stream(self, file_object, read_total=None):
+    def encrypt_stream(self, plain_file_object, read_total=None):
         auth_hmac = self.get_auth_hmac()
-        for chunk in encrypt_stream(self.secret_box, file_object, read_total=read_total):
+        for chunk in encrypt_stream(self.secret_box, plain_file_object, read_total=read_total):
             auth_hmac.update(chunk)
             yield chunk
         self.last_signature = binascii.hexlify(auth_hmac.finalize())
 
-    def decrypt_stream(self, ):
-        pass
+    def sign_stream(self, enc_file_object, read_total=None):
+        return sign_stream(self.get_auth_hmac(), enc_file_object, read_total=read_total)
+
+    def verify_stream(self, enc_file_object, signature, read_total=None):
+        return verify_stream(self.get_auth_hmac(), enc_file_object, signature, read_total=read_total)
+
+    def decrypt_stream(self, enc_file_object, read_total=None, signature=None):
+        if signature:
+            sig_bytes = binascii.unhexlify(signature)
+            auth_hmac = self.get_auth_hmac()
+            for chunk, index in _read_in_chunks(enc_file_object, read_total=read_total):
+                auth_hmac.update(chunk)
+                dec = self.secret_box.decrypt(chunk)
+                yield dec
+            auth_hmac.verify(sig_bytes)
+        else:
+            for dec in decrypt_stream(self.secret_box, enc_file_object, read_total=None):
+                yield dec
 
 
 def _read_in_chunks(file_object, chunk_size=None, read_total=None):
@@ -106,22 +122,22 @@ def get_auth_hmac_from_file(keyfile=AUTHKEY):
     return get_auth_hmac_from_key(auth_key)
 
 
-def encrypt_stream(secret_box, encrypted_file_object, read_total=None):
+def encrypt_stream(secret_box, plain_file_object, read_total=None):
     nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
-    for chunk, index in _read_in_chunks(encrypted_file_object, chunk_size=CHUNK_SIZE - 40, read_total=read_total):
+    for chunk, index in _read_in_chunks(plain_file_object, chunk_size=CHUNK_SIZE - 40, read_total=read_total):
         enc = secret_box.encrypt(chunk, _chunk_nonce(nonce, index))
         yield enc
 
 
-def sign_output(auth_hmac, input_file_object, read_total=None):
-    for chunk, _ in _read_in_chunks(input_file_object, read_total=read_total):
+def sign_stream(auth_hmac, enc_file_object, read_total=None):
+    for chunk, _ in _read_in_chunks(enc_file_object, read_total=read_total):
         auth_hmac.update(chunk)
     return binascii.hexlify(auth_hmac.finalize())
 
 
-def verify_stream(auth_hmac, file_object, signature, read_total=None):
+def verify_stream(auth_hmac, enc_file_object, signature, read_total=None):
     sig_bytes = binascii.unhexlify(signature)
-    for chunk, _ in _read_in_chunks(file_object, read_total=read_total):
+    for chunk, _ in _read_in_chunks(enc_file_object, read_total=read_total):
         auth_hmac.update(chunk)
     try:
         auth_hmac.verify(sig_bytes)
@@ -130,7 +146,7 @@ def verify_stream(auth_hmac, file_object, signature, read_total=None):
         return False
 
 
-def decrypt_stream(secret_box, input_file_object, read_total=None):
-    for chunk, index in _read_in_chunks(input_file_object, read_total=read_total):
+def decrypt_stream(secret_box, enc_file_object, read_total=None):
+    for chunk, index in _read_in_chunks(enc_file_object, read_total=read_total):
         dec = secret_box.decrypt(chunk)
         yield dec
