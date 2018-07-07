@@ -4,7 +4,10 @@
 - upload file batches
 - update database
 - get iventory
-- update inventory"""
+- update inventory
+
+may be of use: https://ourcodeworld.com/articles/read/146/top-5-best-tree-view-jquery-and-javascript-plugins
+"""
 from flask import Flask, render_template
 
 app = Flask(__name__)

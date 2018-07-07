@@ -220,7 +220,7 @@ class VaultStorage:
                 uploader.finalize()
             return uploader.archive_id
         except:
-            self.dump_uploader(uploader)
+            self.dump_uploader(uploader.to_dict())
             raise
 
     def request_inventory(self):
