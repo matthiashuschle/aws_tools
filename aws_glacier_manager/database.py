@@ -5,6 +5,7 @@ For large files, tar a dummy and restore the content in chunks of the original.
 import datetime
 from abc import ABC
 from collections import OrderedDict, namedtuple
+from contextlib import contextmanager
 import sqlite3
 
 
@@ -46,6 +47,8 @@ class SQLiteLog(ABC):
 
     def __init__(self, filename=None):
         self.filename = filename or self.DEFAULT_FILENAME
+        if self.filename is None:
+            raise NotImplementedError('Your derived class can not handle empty filenames!')
         self.init_db()
 
     def init_db(self):
@@ -138,22 +141,27 @@ class InventoryLog(SQLiteLog):
         self.vault_name = vault_name
         super(InventoryLog, self).__init__(filename=filename)
 
+    @contextmanager
+    def connect(self):
+        with sqlite3.Connection(database=self.filename) as con:
+            yield con
+
     def store_request(self, request_dict):
         job_id = request_dict['jobId']
         sent_dt = datetime.datetime.utcnow().isoformat()
-        with sqlite3.Connection(database=self.filename) as con:
+        with self.connect() as con:
             con.execute('INSERT INTO request (vault_name, sent_dt, job_id) VALUES (?, ?, ?)',
                         (self.vault_name, sent_dt, job_id))
 
     def get_open_requests(self):
-        with sqlite3.Connection(database=self.filename) as con:
+        with self.connect() as con:
             cur = con.cursor()
             cur.execute('SELECT * FROM request WHERE NOT retrieved')
             open_requests = [self.RequestRow(*row) for row in cur.fetchall()]
         return open_requests
 
     def get_latest_response(self):
-        with sqlite3.Connection(database=self.filename) as con:
+        with self.connect() as con:
             cur = con.cursor()
             cur.execute('CREATE TEMP TABLE tmp_req AS '
                         'SELECT MAX(sent_dt) AS sent_dt FROM request WHERE vault_name = "%s" AND retrieved'
