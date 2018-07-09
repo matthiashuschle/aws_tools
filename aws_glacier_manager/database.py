@@ -122,11 +122,14 @@ class InventoryLog(SQLiteLog):
             ('request_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('vault_name', 'TEXT NOT NULL'),
             ('sent_dt', 'TEXT NOT NULL'),
-            ('job_id', 'TEXT NOT NULL'),
-            ('retrieved', 'INTEGER DEFAULT 0')
+            ('job_id', 'TEXT NOT NULL')
         ])),
         ('response', OrderedDict([
             ('response_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
+            ('retrieved_dt', 'TEXT NOT NULL'),
+            ('content_type', 'TEXT'),
+            ('status', 'INTEGER'),
+            ('body', 'BLOB'),
             ('request_id', 'INTEGER')
         ]))
     ])
@@ -153,18 +156,49 @@ class InventoryLog(SQLiteLog):
             con.execute('INSERT INTO request (vault_name, sent_dt, job_id) VALUES (?, ?, ?)',
                         (self.vault_name, sent_dt, job_id))
 
+    def store_response(self, request_id, response_dict):
+        retrieved_dt = datetime.datetime.utcnow().isoformat()
+        content_type = response_dict['contentType']
+        status = response_dict['status']
+        body = response_dict['body'].read()
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT response_id FROM response WHERE request_id = %i' % request_id)
+            result = cur.fetchall()
+            # replace already existing responses for this request_id
+            if len(result):
+                con.execute(
+                    'INSERT OR REPLACE INTO response ('
+                    'response_id, retrieved_dt, content_type, status, body, request_id) '
+                    'VALUES (?, ?, ?, ?, ?, ?)', (
+                        result[0][0], retrieved_dt, content_type, status, body, request_id
+                    )
+                )
+            else:
+                con.execute(
+                    'INSERT INTO response ('
+                    'retrieved_dt, content_type, status, body, request_id) '
+                    'VALUES (?, ?, ?, ?, ?)', (
+                        retrieved_dt, content_type, status, body, request_id
+                    )
+                )
+
     def get_open_requests(self):
         with self.connect() as con:
             cur = con.cursor()
-            cur.execute('SELECT * FROM request WHERE NOT retrieved')
-            open_requests = [self.RequestRow(*row) for row in cur.fetchall()]
+            cur.execute('SELECT a.* FROM request a LEFT JOIN response b USING(request_id) '
+                        'WHERE retrieved_dt IS NULL AND vault_name = "%s"' % self.vault_name)
+            result = cur.fetchall()
+            open_requests = [self.RequestRow(*row) for row in result]
         return open_requests
 
     def get_latest_response(self):
         with self.connect() as con:
             cur = con.cursor()
             cur.execute('CREATE TEMP TABLE tmp_req AS '
-                        'SELECT MAX(sent_dt) AS sent_dt FROM request WHERE vault_name = "%s" AND retrieved'
+                        'SELECT MAX(sent_dt) AS sent_dt FROM request a '
+                        'LEFT JOIN response b USING(request_id) '
+                        'WHERE vault_name = "%s" AND retrieved_dt IS NOT NULL'
                         % self.vault_name)
             cur.execute('''\
             SELECT 

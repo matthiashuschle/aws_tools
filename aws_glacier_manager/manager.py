@@ -18,3 +18,8 @@ class VaultManager:
         # ToDo: check whether there are open requests
         request = self.storage.request_inventory()
         self.db.store_request(request)
+
+    def store_inventory_responses(self):
+        for request in self.db.get_open_requests():
+            response = self.storage.retrieve_inventory(request.job_id)
+            self.db.store_response(request.request_id, response)

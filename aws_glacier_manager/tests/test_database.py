@@ -1,6 +1,7 @@
 import os
 from unittest import TestCase
 import sqlite3
+from io import BytesIO
 from .. import database
 
 
@@ -42,6 +43,9 @@ class TestInventoryLog(TestCase):
     def tearDownClass(cls):
         cls.wipe_test_db()
 
+    def tearDown(self):
+        self.wipe_test_db()
+
     def test_init(self):
         database.InventoryLog('dummy_vault', filename=self.filename)
         self.assertTrue(os.path.exists(self.filename))
@@ -52,7 +56,6 @@ class TestInventoryLog(TestCase):
         del inst
         inst = database.InventoryLog('dummy_vault', filename=self.filename)
         self.assertTrue(len(inst.get_open_requests()))
-        self.wipe_test_db()
 
     def test_store_request(self):
         inst = database.InventoryLog('dummy_vault', filename=self.filename)
@@ -63,11 +66,10 @@ class TestInventoryLog(TestCase):
             table = cur.fetchall()
         self.assertEqual(1, len(table))
         row = table[0]
-        self.assertEqual(5, len(row))
+        self.assertEqual(4, len(row))
         row = inst.RequestRow(*row)
         self.assertEqual(row.vault_name, 'dummy_vault')
         self.assertEqual(row.job_id, 'abc')
-        self.assertEqual(row.retrieved, 0)
         # store another one
         inst.store_request({'jobId': 'abcd'})
         with sqlite3.Connection(database=self.filename) as con:
@@ -76,21 +78,97 @@ class TestInventoryLog(TestCase):
             table = cur.fetchall()
         self.assertEqual(1, len(table))
         row = table[0]
-        self.assertEqual(5, len(row))
+        self.assertEqual(4, len(row))
         row = inst.RequestRow(*row)
         self.assertEqual(row.vault_name, 'dummy_vault')
         self.assertEqual(row.job_id, 'abc')
-        self.assertEqual(row.retrieved, 0)
         with sqlite3.Connection(database=self.filename) as con:
             cur = con.cursor()
             cur.execute('SELECT * FROM REQUEST WHERE request_id != %i' % row.request_id)
             table = cur.fetchall()
         self.assertEqual(1, len(table))
         row = table[0]
-        self.assertEqual(5, len(row))
+        self.assertEqual(4, len(row))
         row = inst.RequestRow(*row)
         self.assertEqual(row.vault_name, 'dummy_vault')
         self.assertEqual(row.job_id, 'abcd')
-        self.assertEqual(row.retrieved, 0)
+
+    def test_store_response(self):
+        inst = database.InventoryLog('dummy_vault', filename=self.filename)
+        inst.store_request({'jobId': 'abc'})
+        response = {
+            'ResponseMetadata': {
+                'HTTPHeaders': {
+                    'accept-ranges': 'bytes',
+                    'content-length': '26915',
+                    'content-type': 'application/json',
+                    'date': 'Sun, 08 Jul 2018 18:39:41 GMT',
+                    'x-amzn-requestid': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs'
+                },
+                'HTTPStatusCode': 200,
+                'RequestId': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs',
+                'RetryAttempts': 0
+            },
+            'acceptRanges': 'bytes',
+            'body': BytesIO(b'1234'),
+            'contentType': 'application/json',
+            'status': 200}
+        latest = inst.get_open_requests()[0]
+        inst.store_response(latest.request_id, response)
+        stored = inst.get_latest_response()
+        self.assertEqual(stored.request_id, latest.request_id)
+        self.assertEqual(stored.content_type, 'application/json')
+        self.assertEqual(stored.status, 200)
+        self.assertEqual(stored.body, b'1234')
+        response = {
+            'ResponseMetadata': {
+                'HTTPHeaders': {
+                    'accept-ranges': 'bytes',
+                    'content-length': '26915',
+                    'content-type': 'application/json',
+                    'date': 'Sun, 08 Jul 2018 18:39:41 GMT',
+                    'x-amzn-requestid': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs'
+                },
+                'HTTPStatusCode': 200,
+                'RequestId': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs',
+                'RetryAttempts': 0
+            },
+            'acceptRanges': 'bytes',
+            'body': BytesIO(b'12345'),
+            'contentType': 'application/json',
+            'status': 200}
+        inst.store_response(latest.request_id, response)
+        stored = inst.get_latest_response()
+        self.assertEqual(stored.request_id, latest.request_id)
+        self.assertEqual(stored.content_type, 'application/json')
+        self.assertEqual(stored.status, 200)
+        self.assertEqual(stored.body, b'12345')
+
+    def test_get_open_requests(self):
+        inst = database.InventoryLog('dummy_vault', filename=self.filename)
+        self.assertEqual(0, len(inst.get_open_requests()))
+        inst.store_request({'jobId': 'abc'})
+        self.assertEqual(1, len(inst.get_open_requests()))
+        inst.store_request({'jobId': 'abcd'})
+        self.assertEqual(2, len(inst.get_open_requests()))
+        response = {
+            'ResponseMetadata': {
+                'HTTPHeaders': {
+                    'accept-ranges': 'bytes',
+                    'content-length': '26915',
+                    'content-type': 'application/json',
+                    'date': 'Sun, 08 Jul 2018 18:39:41 GMT',
+                    'x-amzn-requestid': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs'
+                },
+                'HTTPStatusCode': 200,
+                'RequestId': 'yHW7Xuf_3DEjJdACLccRrT11TePr8VVKhC9TOBHm9rxOvcs',
+                'RetryAttempts': 0
+            },
+            'acceptRanges': 'bytes',
+            'body': BytesIO(b'12345'),
+            'contentType': 'application/json',
+            'status': 200}
+        inst.store_response(inst.get_open_requests()[0].request_id, response)
+        self.assertEqual(1, len(inst.get_open_requests()))
 
 
