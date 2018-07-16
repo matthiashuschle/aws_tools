@@ -2,6 +2,7 @@
 Content uploaded to amazon Glacier is tar-zipped and encrypted.
 For large files, tar a dummy and restore the content in chunks of the original.
 """
+import os
 import datetime
 from abc import ABC
 from collections import OrderedDict, namedtuple
@@ -9,7 +10,10 @@ from contextlib import contextmanager
 import sqlite3
 
 
-class ForeignKey:
+ProjectInfo = namedtuple('ProjectInfo', 'name base_path num_files')
+
+
+class Constraint:
 
     def __init__(self, this_column, other_table, other_column):
         self.this_column = this_column
@@ -33,10 +37,23 @@ class ForeignKey:
         )
 
 
-class ForeignKeyIdentical(ForeignKey):
+class ConstraintIdentical(Constraint):
 
     def __init__(self, column, other_table):
-        super(ForeignKeyIdentical, self).__init__(column, other_table, column)
+        super(ConstraintIdentical, self).__init__(column, other_table, column)
+
+
+class ConstraintUniqueIdx(Constraint):
+
+    def __init__(self, column):
+        super(ConstraintUniqueIdx, self).__init__(None, None, None)
+        self.column = column
+
+    def fk_statement(self):
+        return None
+
+    def get_constraint(self, tablename):
+        return 'CONSTRAINT "uix_%s" UNIQUE (%s)' % (self.column, self.column)
 
 
 class SQLiteLog(ABC):
@@ -51,8 +68,13 @@ class SQLiteLog(ABC):
             raise NotImplementedError('Your derived class can not handle empty filenames!')
         self.init_db()
 
-    def init_db(self):
+    @contextmanager
+    def connect(self):
         with sqlite3.Connection(database=self.filename) as con:
+            yield con
+
+    def init_db(self):
+        with self.connect() as con:
             cur = con.cursor()
             for tablename, coldefs in self.TABLE_DEF.items():
                 elements = ['%s %s' % (x, y) for x, y in coldefs.items()]
@@ -69,10 +91,12 @@ class BackupLog(SQLiteLog):
     TABLE_DEF = OrderedDict([
         ('project', OrderedDict([
             ('project_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('name', 'TEXT NOT NULL')
+            ('name', 'TEXT NOT NULL'),
+            ('base_path', 'TEXT NOT NULL')
         ])),
         ('file', OrderedDict([
             ('file_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
+            ('is_folder', 'INTEGER DEFAULT 0'),
             ('name', 'TEXT NOT NULL'),
             ('path', 'TEXT NOT NULL'),
             ('size', 'INTEGER NOT NULL'),
@@ -91,19 +115,32 @@ class BackupLog(SQLiteLog):
         ])),
     ])
     TABLE_FK = {
-        'file': [ForeignKeyIdentical('project_id', 'project')],
-        'chunk': [ForeignKeyIdentical('file_id', 'file')]
+        'project': [ConstraintUniqueIdx('name')],
+        'file': [ConstraintIdentical('project_id', 'project')],
+        'chunk': [ConstraintIdentical('file_id', 'file')]
     }
     DEFAULT_FILENAME = 'backup_log.sqlite'
 
-    def __init__(self, project, filename=None):
+    def __init__(self, project, base_path='/', filename=None):
         self.project = project
+        self.base_path = base_path
         super(BackupLog, self).__init__(filename=filename)
         self.filename = filename
         self.init_db()
 
+    def create(self):
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT project_id FROM project WHERE name = ?', (self.project,))
+            if len(cur.fetchall()):
+                raise RuntimeError('project %s already exists!' % self.project)
+            cur.execute('INSERT INTO project (name, base_path) VALUES (?, ?)', (self.project, self.base_path))
+
     def add_file(self, recursive=True):
-        """ Add a file to the database. If it is a directory, descend. Should not follow symlinks to folders. """
+        """ Add a file to the database. If it is a directory, descend. Should not follow symlinks to folders.
+
+        This must be either complex or handled externally. Having directories and files is not a trivial task,
+        as a directory may expand to more files over time, or files might be excluded from a directory"""
         pass
 
     def get_files_for_upload(self):
@@ -134,7 +171,7 @@ class InventoryLog(SQLiteLog):
         ]))
     ])
     TABLE_FK = {
-        'response': [ForeignKeyIdentical('request_id', 'request')]
+        'response': [ConstraintIdentical('request_id', 'request')]
     }
     DEFAULT_FILENAME = 'inventory_log.sqlite'
     RequestRow = namedtuple('RequestRow', list(TABLE_DEF['request'].keys()))
@@ -143,11 +180,6 @@ class InventoryLog(SQLiteLog):
     def __init__(self, vault_name, filename=None):
         self.vault_name = vault_name
         super(InventoryLog, self).__init__(filename=filename)
-
-    @contextmanager
-    def connect(self):
-        with sqlite3.Connection(database=self.filename) as con:
-            yield con
 
     def store_request(self, request_dict):
         job_id = request_dict['jobId']
@@ -215,3 +247,15 @@ class InventoryLog(SQLiteLog):
             return last_response
 
 
+def get_projects_for_file(filename):
+    if not os.path.exists(filename):
+        return []
+    else:
+        with sqlite3.Connection(database=filename) as con:
+            cur = con.cursor()
+            cur.execute('SELECT project.name, '
+                        'project.base_path, '
+                        'COUNT(file_id) AS num_files '
+                        'FROM project LEFT JOIN file USING(project_id) '
+                        'GROUP BY project_id')
+            return [ProjectInfo(*x) for x in cur.fetchall()]
