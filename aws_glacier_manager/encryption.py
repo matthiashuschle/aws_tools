@@ -83,6 +83,20 @@ class CryptoHandler:
             for dec in decrypt_stream(self.secret_box, enc_file_object, read_total=None):
                 yield dec
 
+    @staticmethod
+    def get_unenc_block_size(enc_block_size):
+        """ Calculate how many unencrypted bytes amount to the desired encrypted amount.
+
+        :param enc_block_size: desired encrypted number of bytes
+        :return: size of unencrypted data
+        :rtype: int
+        :raises ValueError: if the target block size can not be created from the encryption chunk size.
+        """
+        if enc_block_size % CHUNK_SIZE:
+            raise ValueError('can not divide %i by %i!' % (enc_block_size, CHUNK_SIZE))
+        n_chunks = enc_block_size // CHUNK_SIZE
+        return n_chunks * (CHUNK_SIZE - 40)
+
 
 def _read_in_chunks(file_object, chunk_size=None, read_total=None):
     """ Generator to read a stream piece by piece with a given chunk size.

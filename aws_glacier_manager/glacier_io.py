@@ -6,29 +6,77 @@ see https://boto3.readthedocs.io/en/latest/guide/quickstart.html#configuration
 
 for boto3 Documentation on Glacier, see https://boto3.readthedocs.io/en/latest/reference/services/glacier.html
 """
-
 import os
+from io import BytesIO
 import logging
 import base64
 import json
 import boto3
 from botocore.utils import calculate_tree_hash
+from .encryption import CryptoHandler
 
 
 class MultipartChunk:
 
-    def __init__(self, filepath, block_size, start_loc, end_loc):
+    classname = 'MultipartChunk'
+
+    def __init__(self, filepath, block_size, start_loc, end_loc, crypto_handler=None):
+        """ Handles generation of Data chunks as atomic parts of the Glacier upload.
+
+        :param str filepath: path of the file to upload
+        :param int block_size: size of the part to be uploaded. Must not match end_loc - start_loc + 1,
+            as encryption increases the volume.
+        :param int start_loc: start offset within unencrypted file
+        :param int end_loc: end offset within unencrypted file
+        :param CryptoHandler crypto_handler: manages data encryption, optional
+        """
         self.filepath = filepath
         assert end_loc - start_loc < block_size
         self.block_size = block_size
         self.start_loc = start_loc
         self.end_loc = end_loc
         self.completed = False
+        self._crypto_handler = crypto_handler
+        self._encrypted = crypto_handler is not None
         self._checksum = None
         self._data = None
 
+    @property
+    def encrypted(self):
+        """ As encryption determines the relation of end_pos and block size, this should not be changed.
+
+        :rtype: bool
+        """
+        return self._encrypted
+
+    @property
+    def crypto_handler(self):
+        """ If using encryption, this must be set before usage.
+
+        :rtype: CryptoHandler
+        :raises RuntimeError: on illegal use
+        """
+        if self.encrypted and self.crypto_handler is None:
+            raise RuntimeError('crypto_handler is undefined for encrypted Chunk!')
+        return self._crypto_handler
+
+    @crypto_handler.setter
+    def crypto_handler(self, value):
+        """ Allow setting only if using encryption.
+
+        :param CryptoHandler value:
+        :raises RuntimeError: on illegal use
+        """
+        if not self.encrypted:
+            raise RuntimeError('You can not set a crypto_handler, if the chunk is not created as encrypted!')
+        self._crypto_handler = value
+
     def __str__(self):
-        return 'MultipartChunk(%r, %i, %i, %i)' % (self.filepath, self.block_size, self.start_loc, self.end_loc)
+        return '%s(%r, %i, %i, %i, %s)' % (
+            self.classname, self.filepath,
+            self.block_size, self.start_loc, self.end_loc,
+            'encrypted' if self.encrypted else 'unencrypted'
+        )
 
     def to_dict(self):
         return {x: getattr(self, x) for x in [
@@ -37,6 +85,7 @@ class MultipartChunk:
             'start_loc',
             'end_loc',
             'completed',
+            '_encrypted',
             '_checksum'
         ]}
 
@@ -47,28 +96,53 @@ class MultipartChunk:
             'block_size',
             'start_loc',
             'end_loc']})
-        for key in ['completed', '_checksum']:
+        for key in ['completed', '_checksum', '_encrypted']:
             setattr(instance, key, val_dict[key])
         return instance
 
     @property
     def data(self):
+        """ Fetch the data to be sent. Handles encryption internally.
+
+        :rtype: bytearray
+        """
         if self._data is None:
             with open(self.filepath, 'rb',) as f_in:
                 f_in.seek(self.start_loc)
-                self._data = f_in.read(self.block_size)
+                if self.encrypted:
+                    # we pipe the data through the encryptor, inflating due to signatures
+                    data = BytesIO()
+                    unenc_block_size = self.crypto_handler.get_unenc_block_size(self.block_size)
+                    for chunk in self.crypto_handler.encrypt_stream(f_in, unenc_block_size):
+                        data.write(chunk)
+                    data.seek(0)
+                    self._data = data.getvalue()
+                else:
+                    self._data = f_in.read(self.block_size)
         return self._data
 
     @property
     def pos_range(self):
+        """ string representation of file position range.
+
+        :rtype: str
+        """
         return 'bytes %i-%i/*' % (self.start_loc, self.end_loc)
 
     def finalize(self):
+        """ Free memory after upload completion.
+
+        :return: None
+        """
         self.completed = True
         self._data = None
 
     @property
     def checksum(self):
+        """ Calculate the checksum for the upload, as needed by Glacier API.
+
+        :rtype: str
+        """
         if self._checksum is None:
             self._checksum = calculate_tree_hash(self.data)
         if self.completed:
@@ -76,13 +150,21 @@ class MultipartChunk:
         return self._checksum
 
     @classmethod
-    def split_file(cls, filepath, block_size):
+    def split_file(cls, filepath, block_size, crypto_handler=None):
+        """ Create a Chunk array from a file.
+
+        :param str filepath: path of the file.
+        :param int block_size: size per upload chunk. must be 2**k.
+        :param CryptoHandler crypto_handler: optional encryption handler.
+        """
         chunks = []
         total_size = get_file_size(filepath)
         cur_position = 0
+        # if encryption is used, the unencrypted block size must be used for input chunks
+        unenc_block_size = block_size if crypto_handler is None else crypto_handler.get_unenc_block_size(block_size)
         while cur_position <= total_size:
-            end_pos = min(cur_position + block_size, total_size)
-            chunks.append(cls(filepath, block_size, cur_position, end_pos - 1))
+            end_pos = min(cur_position + unenc_block_size, total_size)
+            chunks.append(cls(filepath, block_size, cur_position, end_pos - 1, crypto_handler=crypto_handler))
             cur_position = end_pos
         return chunks
 
