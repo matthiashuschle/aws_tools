@@ -5,10 +5,10 @@ from io import BytesIO
 from .. import database
 
 
-class TestForeignKey(TestCase):
+class TestConstraint(TestCase):
 
     def test_fk_default(self):
-        fk = database.ForeignKey('col_a', 'tab_b', 'col_b')
+        fk = database.Constraint('col_a', 'tab_b', 'col_b')
         self.assertEqual(fk.this_column, 'col_a')
         self.assertEqual(fk.other_table, 'tab_b')
         self.assertEqual(fk.other_column, 'col_b')
@@ -17,7 +17,7 @@ class TestForeignKey(TestCase):
                          'CONSTRAINT fk_tab_a_tab_b_col_b FOREIGN KEY (col_a) REFERENCES tab_b (col_b)')
 
     def test_fk_identical(self):
-        fk = database.ForeignKeyIdentical('col_a', 'tab_b')
+        fk = database.ConstraintIdentical('col_a', 'tab_b')
         self.assertEqual(fk.this_column, 'col_a')
         self.assertEqual(fk.other_table, 'tab_b')
         self.assertEqual(fk.other_column, 'col_a')
@@ -25,8 +25,13 @@ class TestForeignKey(TestCase):
         self.assertEqual(fk.get_constraint('tab_a'),
                          'CONSTRAINT fk_tab_a_tab_b_col_a FOREIGN KEY (col_a) REFERENCES tab_b (col_a)')
 
+    def test_unique_idx(self):
+        fk = database.ConstraintUniqueIdx('col_a')
+        self.assertEqual(fk.column, 'col_a')
+        self.assertEqual(fk.get_constraint('foo'), 'CONSTRAINT "uix_col_a" UNIQUE (col_a)')
 
-class TestInventoryLog(TestCase):
+
+class DatabaseSetup(TestCase):
 
     filename = 'test_database.sqlite'
 
@@ -45,6 +50,9 @@ class TestInventoryLog(TestCase):
 
     def tearDown(self):
         self.wipe_test_db()
+
+
+class TestInventoryLog(DatabaseSetup):
 
     def test_init(self):
         database.InventoryLog('dummy_vault', filename=self.filename)
@@ -172,3 +180,38 @@ class TestInventoryLog(TestCase):
         self.assertEqual(1, len(inst.get_open_requests()))
 
 
+class TestBackupLog(DatabaseSetup):
+
+    def test_create(self):
+        inst = database.BackupLog('foo', filename=self.filename)
+        with inst.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT COUNT(*) FROM project')
+            self.assertEqual(0, cur.fetchall()[0][0])
+        inst.create()
+        with inst.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT COUNT(*) FROM project')
+            self.assertEqual(1, cur.fetchall()[0][0])
+        self.assertRaises(RuntimeError, inst.create)
+        with inst.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT COUNT(*) FROM project')
+            self.assertEqual(1, cur.fetchall()[0][0])
+        with inst.connect() as con:
+            cur = con.cursor()
+            cur.execute('SELECT COUNT(*) FROM project WHERE name="foo"')
+            self.assertEqual(1, cur.fetchall()[0][0])
+
+
+class TestOther(DatabaseSetup):
+
+    def test_get_projects_for_file(self):
+        self.assertEqual([], database.get_projects_for_file(self.filename))
+        inst = database.BackupLog('foo', filename=self.filename)
+        inst.create()
+        self.assertEqual([database.ProjectInfo('foo', '/', 0)], database.get_projects_for_file(self.filename))
+        inst = database.BackupLog('bar', filename=self.filename)
+        inst.create()
+        self.assertEqual([database.ProjectInfo('foo', '/', 0), database.ProjectInfo('bar', '/', 0)],
+                         database.get_projects_for_file(self.filename))
