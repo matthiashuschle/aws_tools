@@ -8,6 +8,7 @@ from abc import ABC
 from collections import OrderedDict, namedtuple
 from contextlib import contextmanager
 import sqlite3
+from .datatypes import DerivedKeySetup
 
 
 ProjectInfo = namedtuple('ProjectInfo', 'name base_path num_files')
@@ -103,6 +104,16 @@ class BackupLog(SQLiteLog):
             ('outdated', 'INTEGER DEFAULT 0'),
             ('project_id', 'INTEGER')
         ])),
+        ('derived_key_setup', OrderedDict([
+            ('derived_key_setup_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
+            ('construct', 'TEXT'),
+            ('ops', 'INTEGER'),
+            ('mem', 'INTEGER'),
+            ('key_size_enc', 'INTEGER'),
+            ('key_size_sig', 'INTEGER'),
+            ('salt_key_enc', 'BLOB'),
+            ('salt_key_sig', 'BLOB')
+        ])),
         ('chunk', OrderedDict([
             ('chunk_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('upload_id', 'TEXT'),
@@ -150,6 +161,38 @@ class BackupLog(SQLiteLog):
     def define_chunks(self, file):
         """ Create chunk information for a file. """
         pass
+
+    def add_derived_key_setup(self, setup):
+        """ Add a key derivation setup.
+
+        :param DerivedKeySetup setup: key derivation settings
+        :returns table entry ID
+        :rtype: int
+        """
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                'INSERT INTO derived_key_setup (%s) VALUES '
+                '(?, ?, ?, ?, ?, ?, ?)' % setup.db_columns(), setup.to_db_tuple()
+            )
+            cur.execute('SELECT last_insert_rowid() FROM derived_key_setup')
+            entry_id = cur.fetchall()[0][0]
+        return entry_id
+
+    def get_derived_key_setup(self, entry_id):
+        """ Retrieve a key derivation setup from the database.
+
+        :param int entry_id: row ID
+        :rtype: DerivedKeySetup
+        """
+        with self.connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                'SELECT %s FROM derived_key_setup WHERE derived_key_setup_id = %i' %
+                (DerivedKeySetup.db_columns(), entry_id)
+            )
+            setup = cur.fetchall()[0]
+        return DerivedKeySetup.from_db_tuple(setup)
 
 
 class InventoryLog(SQLiteLog):

@@ -34,6 +34,14 @@ class TestEncryptionGeneral(TestCase):
             checksum.update(chunk)
         self.assertEqual(checksum.digest(), checksum_in.digest())
 
+    def test_create_keys_from_password(self):
+        password = b'supersecret'
+        keys = encryption.create_keys_from_password(password)
+        recreated_keys = encryption.create_keys_from_password(password, keys.setup)
+        self.assertEqual(keys.setup, recreated_keys.setup)
+        self.assertEqual(keys.key_sig, recreated_keys.key_sig)
+        self.assertEqual(keys.key_enc, recreated_keys.key_enc)
+
     def test_class(self):
         secret_key, auth_key = encryption.create_keys(None)
         handler = encryption.CryptoHandler(secret_key, auth_key)

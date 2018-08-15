@@ -8,9 +8,11 @@ import nacl.secret
 import nacl.utils
 import nacl.encoding
 import nacl.signing
+import nacl.pwhash
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.exceptions import InvalidSignature
+from .datatypes import DerivedKeySetup, DerivedKeys
 
 SYMKEY = 'symkey.bin'
 AUTHKEY = 'authkey.bin'
@@ -32,6 +34,38 @@ def create_keys(out_path, replace=False):
         f.write(auth_key)
 
 
+def create_keys_from_password(password, setup=None):
+    """ Create encryption and signature keys from a password.
+
+    Uses salt and resilient hashing. Returns the hashing settings, so the keys can be recreated with the same password.
+    :param bytes password: password as bytestring
+    :param DerivedKeySetup setup: settings for the hashing
+    :rtype: DerivedKeys
+    """
+    setup = setup or DerivedKeySetup(
+        ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
+        mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
+        construct='argon2i',
+        salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
+        salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
+        key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
+        key_size_sig=64
+    )
+    kdf = None
+    if setup.construct == 'argon2i':
+        kdf = nacl.pwhash.argon2i.kdf
+    if kdf is None:
+        raise AttributeError('construct %s is not implemented' % setup.construct)
+    key_enc = kdf(setup.key_size_enc, password, setup.salt_key_enc,
+                  opslimit=setup.ops, memlimit=setup.mem)
+    key_sig = kdf(setup.key_size_sig, password, setup.salt_key_sig,
+                  opslimit=setup.ops, memlimit=setup.mem)
+    return DerivedKeys(
+        key_enc=key_enc,
+        key_sig=key_sig,
+        setup=setup)
+
+
 def _chunk_nonce(base, index):
     size = nacl.secret.SecretBox.NONCE_SIZE
     return int.to_bytes(int.from_bytes(base, byteorder='big') + index, length=size, byteorder='big')
@@ -41,8 +75,8 @@ class CryptoHandler:
 
     def __init__(self, secret_key, auth_key):
         self._secret_key = secret_key
-        self.secret_box = get_secret_box_from_key(secret_key)
-        self.auth_key = auth_key
+        self.secret_box = get_secret_box_from_key(secret_key)  # for encryption
+        self.auth_key = auth_key  # for signing
         self.last_signature = None
 
     @property
