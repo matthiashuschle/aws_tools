@@ -3,6 +3,7 @@ Handles encryption. Based on the awesome post of Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
 import os
+import contextlib
 import binascii
 import nacl.secret
 import nacl.utils
@@ -34,23 +35,18 @@ def create_keys(out_path, replace=False):
         f.write(auth_key)
 
 
-def create_keys_from_password(password, setup=None):
+def create_keys_from_password(password, setup=None, enable_auth_key=False):
     """ Create encryption and signature keys from a password.
 
     Uses salt and resilient hashing. Returns the hashing settings, so the keys can be recreated with the same password.
+    original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
     :param bytes password: password as bytestring
     :param DerivedKeySetup setup: settings for the hashing
+    :param bool enable_auth_key: generate a key for full data signatures via HMAC. Usually not necessary, as each block
+        is automatically signed. The only danger is block loss and block order manipulation.
     :rtype: DerivedKeys
     """
-    setup = setup or DerivedKeySetup(
-        ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
-        mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
-        construct='argon2i',
-        salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
-        salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
-        key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
-        key_size_sig=64
-    )
+    setup = setup or DerivedKeySetup.create_default(enable_auth_key=enable_auth_key)
     kdf = None
     if setup.construct == 'argon2i':
         kdf = nacl.pwhash.argon2i.kdf
@@ -59,7 +55,7 @@ def create_keys_from_password(password, setup=None):
     key_enc = kdf(setup.key_size_enc, password, setup.salt_key_enc,
                   opslimit=setup.ops, memlimit=setup.mem)
     key_sig = kdf(setup.key_size_sig, password, setup.salt_key_sig,
-                  opslimit=setup.ops, memlimit=setup.mem)
+                  opslimit=setup.ops, memlimit=setup.mem) if setup.key_size_sig else b''
     return DerivedKeys(
         key_enc=key_enc,
         key_sig=key_sig,
@@ -73,11 +69,22 @@ def _chunk_nonce(base, index):
 
 class CryptoHandler:
 
-    def __init__(self, secret_key, auth_key):
+    def __init__(self, secret_key, auth_key=None):
         self._secret_key = secret_key
         self.secret_box = get_secret_box_from_key(secret_key)  # for encryption
         self.auth_key = auth_key  # for signing
-        self.last_signature = None
+        self._last_signature = None
+
+    @property
+    def last_signature(self):
+        return self._last_signature
+
+    @last_signature.setter
+    def last_signature(self, val):
+        if self.auth_key:
+            self._last_signature = binascii.hexlify(val)
+        else:
+            self._last_signature = None
 
     @property
     def secret_key(self):
@@ -88,31 +95,55 @@ class CryptoHandler:
         self._secret_key = val
         self.secret_box = get_secret_box_from_key(val)
 
+    @contextlib.contextmanager
+    def init_hmac(self, force=False):
+        """ Creates a new HMAC instance if possible.
+
+        :param bool force: must return an HMAC handler, fails if not possible
+        :rtype: hmac.HMAC
+        :raises RuntimeError if force is True, but no auth_key available
+        """
+        if self.auth_key:
+            yield get_auth_hmac_from_key(self.auth_key)
+        else:
+            if force:
+                raise RuntimeError('no signature key given, but HMAC requested!')
+
+            class HMACDummy:
+                """ A dummy that ignores the applied actions. """
+                update = staticmethod(lambda data: None)
+                finalize = staticmethod(lambda: None)
+            yield HMACDummy
+
     def get_auth_hmac(self):
+        if self.auth_key is None:
+            return None
         return get_auth_hmac_from_key(self.auth_key)
 
     def encrypt_stream(self, plain_file_object, read_total=None):
-        auth_hmac = self.get_auth_hmac()
-        for chunk in encrypt_stream(self.secret_box, plain_file_object, read_total=read_total):
-            auth_hmac.update(chunk)
-            yield chunk
-        self.last_signature = binascii.hexlify(auth_hmac.finalize())
+        with self.init_hmac() as auth_hmac:
+            for chunk in encrypt_stream(self.secret_box, plain_file_object, read_total=read_total):
+                auth_hmac.update(chunk)
+                yield chunk
+            self.last_signature = auth_hmac.finalize()
 
     def sign_stream(self, enc_file_object, read_total=None):
-        return sign_stream(self.get_auth_hmac(), enc_file_object, read_total=read_total)
+        with self.init_hmac(force=True) as auth_hmac:
+            return sign_stream(auth_hmac, enc_file_object, read_total=read_total)
 
     def verify_stream(self, enc_file_object, signature, read_total=None):
-        return verify_stream(self.get_auth_hmac(), enc_file_object, signature, read_total=read_total)
+        with self.init_hmac(force=True) as auth_hmac:
+            return verify_stream(auth_hmac, enc_file_object, signature, read_total=read_total)
 
     def decrypt_stream(self, enc_file_object, read_total=None, signature=None):
         if signature:
             sig_bytes = binascii.unhexlify(signature)
-            auth_hmac = self.get_auth_hmac()
-            for chunk, index in _read_in_chunks(enc_file_object, read_total=read_total):
-                auth_hmac.update(chunk)
-                dec = self.secret_box.decrypt(chunk)
-                yield dec
-            auth_hmac.verify(sig_bytes)
+            with self.init_hmac(force=True) as auth_hmac:
+                for chunk, index in _read_in_chunks(enc_file_object, read_total=read_total):
+                    auth_hmac.update(chunk)
+                    dec = self.secret_box.decrypt(chunk)
+                    yield dec
+                auth_hmac.verify(sig_bytes)
         else:
             for dec in decrypt_stream(self.secret_box, enc_file_object, read_total=None):
                 yield dec

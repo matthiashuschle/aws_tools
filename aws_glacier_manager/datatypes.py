@@ -1,5 +1,6 @@
 from collections import namedtuple
 import base64
+from nacl import pwhash, utils, secret
 
 
 class DerivedKeySetup:
@@ -46,6 +47,24 @@ class DerivedKeySetup:
             key_size_sig=db_tuple[4],
             salt_key_enc=base64.b64decode(db_tuple[5]),
             salt_key_sig=base64.b64decode(db_tuple[6])
+        )
+
+    @classmethod
+    def create_default(cls, enable_auth_key=False):
+        """ Create default settings for encryption key derivation from password.
+
+        original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+        :param bool enable_auth_key: generate a key for full data signatures via HMAC
+        :rtype: DerivedKeySetup
+        """
+        return cls(
+            ops=pwhash.argon2i.OPSLIMIT_SENSITIVE,
+            mem=pwhash.argon2i.MEMLIMIT_SENSITIVE,
+            construct='argon2i',
+            salt_key_enc=utils.random(pwhash.argon2i.SALTBYTES),
+            salt_key_sig=utils.random(pwhash.argon2i.SALTBYTES) if enable_auth_key else b'',
+            key_size_enc=secret.SecretBox.KEY_SIZE,
+            key_size_sig=64 if enable_auth_key else 0
         )
 
 
