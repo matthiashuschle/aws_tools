@@ -118,10 +118,13 @@ class BackupLog(SQLiteLog):
             ('chunk_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
             ('upload_id', 'TEXT'),
             ('checksum', 'TEXT'),
-            ('signature', 'TEXT'),
+            ('signature_type', 'TEXT'),
+            ('signature', 'BLOB'),
+            ('verify_key', 'BLOB'),
             ('start_offset', 'INTEGER NOT NULL'),
             ('size', 'INTEGER NOT NULL'),
             ('encrypted', 'INTEGER DEFAULT 0'),
+            ('derived_key_setup_id', 'INTEGER'),
             ('file_id', 'INTEGER')
         ])),
     ])

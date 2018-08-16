@@ -33,8 +33,8 @@ class DerivedKeySetup:
             self.construct,
             self.key_size_enc,
             self.key_size_sig,
-            base64.b64encode(self.salt_key_enc),
-            base64.b64encode(self.salt_key_sig)
+            self.salt_key_enc,
+            self.salt_key_sig
         )
 
     @classmethod
@@ -45,8 +45,8 @@ class DerivedKeySetup:
             construct=db_tuple[2],
             key_size_enc=db_tuple[3],
             key_size_sig=db_tuple[4],
-            salt_key_enc=base64.b64decode(db_tuple[5]),
-            salt_key_sig=base64.b64decode(db_tuple[6])
+            salt_key_enc=db_tuple[5],
+            salt_key_sig=db_tuple[6]
         )
 
     @classmethod
