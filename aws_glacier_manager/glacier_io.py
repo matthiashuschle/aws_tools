@@ -90,7 +90,7 @@ class MultipartChunk:
         ]}
 
     @classmethod
-    def from_dict(cls, val_dict):
+    def from_dict(cls, val_dict, crypto_handler=None):
         instance = cls(**{x: y for x, y in val_dict.items() if x in [
             'filepath',
             'block_size',
@@ -98,6 +98,8 @@ class MultipartChunk:
             'end_loc']})
         for key in ['completed', '_checksum', '_encrypted']:
             setattr(instance, key, val_dict[key])
+        if crypto_handler is not None:
+            instance.crypto_handler = crypto_handler
         return instance
 
     @property
@@ -173,11 +175,12 @@ class MultipartUpload:
 
     DEFAULT_BLOCK = 2 * 1024 * 1024
 
-    def __init__(self, vault_name, filepath, block_size=None, description=''):
+    def __init__(self, vault_name, filepath, block_size=None, description='', crypto_handler=None):
         self.vault_name = vault_name
         self.filepath = filepath
         self.block_size = block_size or self.DEFAULT_BLOCK
         self.description = description
+        self.crypto_handler = crypto_handler
         self.upload_id = None
         self.archive_id = None
         self._chunks = []
@@ -197,15 +200,15 @@ class MultipartUpload:
         return dict_out
 
     @classmethod
-    def from_dict(cls, val_dict):
-        instance = cls(**{x: y for x, y in val_dict.items() if x in [
+    def from_dict(cls, val_dict, crypto_handler=None):
+        instance = cls(crypto_handler=crypto_handler, **{x: y for x, y in val_dict.items() if x in [
             'vault_name',
             'filepath',
             'block_size',
             'description']})
         for key in ['upload_id', 'archive_id', 'responses']:
             setattr(instance, key, val_dict[key])
-        instance._chunks = [MultipartChunk.from_dict(x) for x in val_dict['_chunks']]
+        instance._chunks = [MultipartChunk.from_dict(x, crypto_handler=crypto_handler) for x in val_dict['_chunks']]
         return instance
 
     def initialize(self):
@@ -225,7 +228,7 @@ class MultipartUpload:
     @property
     def chunks(self):
         if not self._chunks:
-            self._chunks = MultipartChunk.split_file(self.filepath, self.block_size)
+            self._chunks = MultipartChunk.split_file(self.filepath, self.block_size, crypto_handler=self.crypto_handler)
         return self._chunks
 
     def upload(self):
