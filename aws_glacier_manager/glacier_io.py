@@ -16,6 +16,13 @@ from botocore.utils import calculate_tree_hash
 from .encryption import CryptoHandler
 
 
+# ToDo:
+# - smoothing the transition from MultipartChunk and MultipartUpload in and out of database
+# - redesign VaultStorage. It's so far a POC and does not properly allow storing or loading its state
+# - for the above: think about database-abstraction, but not in this module!
+# - set encryption on project level -> decouple from projects -> allow file path encryption
+
+
 class MultipartChunk:
 
     classname = 'MultipartChunk'
