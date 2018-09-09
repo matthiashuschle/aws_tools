@@ -10,26 +10,38 @@ from contextlib import contextmanager
 from sqlalchemy.orm import sessionmaker
 from . import config
 
-BackupLogBase = declarative_base()
+
+class TableUtility:
+
+    id_column = None
+
+    @classmethod
+    def id_col_property(cls):
+        return getattr(cls, cls.id_column)
+
+    @classmethod
+    def from_db(cls, row_id, session):
+        return session.query(cls).filter(cls.id_col_property() == row_id).first()
+
+
+BackupLogBase = declarative_base(cls=TableUtility)
 
 
 # == File Backup
 
 class TabProject(BackupLogBase):
     __tablename__ = 'project'
+    id_column = 'project_id'
 
     project_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
     base_path = Column(String, nullable=False)
     vault = Column(String)
 
-    def __init__(self, name, base_path):
-        self.name = name
-        self.base_path = base_path
-
 
 class TabFile(BackupLogBase):
     __tablename__ = 'file'
+    id_column = 'file_id'
 
     file_id = Column(Integer, primary_key=True, autoincrement=True)
     is_folder = Column(Boolean, default=False)
@@ -37,13 +49,8 @@ class TabFile(BackupLogBase):
     path = Column(String, nullable=False)
     size = Column(Integer)
     outdated = Column(Boolean, default=False)
-    project_id = Column(Integer, ForeignKey('project.project_id'))
+    project_id = Column(Integer, ForeignKey('project.project_id'), nullable=False)
     project = relationship("TabProject", back_populates="file")
-
-    def __init__(self, name, path, project_id):
-        self.name = name
-        self.path = path
-        self.project_id = project_id
 
 
 TabProject.files = relationship('TabFile', order_by=TabFile.file_id, back_populates="project")
@@ -51,6 +58,7 @@ TabProject.files = relationship('TabFile', order_by=TabFile.file_id, back_popula
 
 class TabDerivedKeySetup(BackupLogBase):
     __tablename__ = 'derived_key_setup'
+    id_column = 'derived_key_setup_id'
 
     derived_key_setup_id = Column(Integer, primary_key=True, autoincrement=True)
     construct = Column(String, nullable=False)
@@ -61,16 +69,10 @@ class TabDerivedKeySetup(BackupLogBase):
     salt_key_enc = Column(Binary, nullable=False)
     salt_key_sig = Column(Binary, default=b'')
 
-    def __init__(self, construct, ops, mem, key_size_enc, salt_key_enc):
-        self.construct = construct
-        self.ops = ops
-        self.mem = mem
-        self.key_size_enc = key_size_enc
-        self.salt_key_enc = salt_key_enc
-
 
 class TabChunk(BackupLogBase):
     __tablename__ = 'chunk'
+    id_column = 'chunk_id'
 
     chunk_id = Column(Integer, primary_key=True, autoincrement=True)
     upload_id = Column(String)
@@ -83,15 +85,8 @@ class TabChunk(BackupLogBase):
     encrypted = Column(Boolean, default=False)
     derived_key_setup_id = Column(Integer, ForeignKey('derived_key_setup.derived_key_setup_id'))
     derived_key_setup = relationship('TabDerivedKeySetup', back_populates='chunk')
-    file_id = Column(Integer, ForeignKey('file.file_id'))
+    file_id = Column(Integer, ForeignKey('file.file_id'), nullable=False)
     file = relationship('TabFile', back_populates='chunk')
-
-    def __init__(self, file_id, start_offset, size, encrypted, derived_key_setup_id):
-        self.file_id = file_id
-        self.start_offset = start_offset
-        self.size = size
-        self.encrypted = encrypted
-        self.derived_key_setup_id = derived_key_setup_id
 
 
 TabDerivedKeySetup.chunks = relationship('TabChunk', order_by=TabChunk.chunk_id, back_populates="derived_key_setup")
@@ -102,19 +97,17 @@ TabFile.chunks = relationship('TabChunk', order_by=TabChunk.chunk_id, back_popul
 
 class TabInventoryRequest(BackupLogBase):
     __tablename__ = 'inventory_request'
+    id_column = 'request_id'
 
     request_id = Column(Integer, primary_key=True, autoincrement=True)
     vault_name = Column(String, nullable=False)
     sent_dt = Column(DateTime, nullable=False)
     job_id = Column(String, nullable=False)
 
-    def __init__(self, name, base_path):
-        self.name = name
-        self.base_path = base_path
-
 
 class TabInventoryResponse(BackupLogBase):
     __tablename__ = 'inventory_response'
+    id_column = 'response_id'
 
     response_id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(Integer, ForeignKey('inventory_request.request_id'))
@@ -123,10 +116,6 @@ class TabInventoryResponse(BackupLogBase):
     content_type = Column(String)
     status = Column(Integer)
     body = Column(Binary)
-
-    def __init__(self, request_id, retrieved_dt):
-        self.request_id = request_id
-        self.retrieved_dt = retrieved_dt
 
 
 TabInventoryRequest.response = relationship('TabInventoryResponse', order_by=TabInventoryResponse.response_id,
@@ -143,7 +132,10 @@ class SessionContext:
         self.session_fac = sessionmaker(bind=self.engine)
 
     @contextmanager
-    def __call__(self, *args, **kwargs):
+    def __call__(self, session=None):
+        if session is not None:
+            yield session
+            return
         session = self.session_fac()
         try:
             yield session

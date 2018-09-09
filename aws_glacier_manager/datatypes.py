@@ -1,7 +1,10 @@
 import os
 import datetime
+import glob
+from contextlib import suppress
 from abc import ABC, abstractmethod
 from collections import OrderedDict, namedtuple
+from itertools import chain
 import sqlite3
 from sqlalchemy import create_engine
 from . import database
@@ -19,33 +22,47 @@ class UnknownId(Exception):
     pass
 
 
-class BackupLog:
-    pass
-
-
 class MappedBase(ABC):
 
-    table_class = None  # ORM class
-    id_column = ''  # name of the ID in this class, and the property of the ORM class
-    unique_columns = []  # columns that have a unique constraint. Checked on creation.
-    update_columns = []
+    table_class = database.BackupLogBase  # ORM class
+    required_cols = []
+    optional_cols = []
+
+    def __init__(self, *args, **kwargs):
+        for arg in self.required_cols:
+            if arg not in kwargs:
+                raise AttributeError('missing required argument: %s' % arg)
+            setattr(self, arg, kwargs[arg])
+            del kwargs[arg]
+        for arg in self.optional_cols:
+            setattr(self, arg, kwargs.get(arg, None))
+            with suppress(KeyError):
+                del kwargs[arg]
+        if len(kwargs):
+            raise AttributeError('unexpected attributes: %s' % [x for x in kwargs])
+        with database.make_session() as session:
+            self._create_db_entry(session)
+
+    @classmethod
+    def columns_for_update(cls):
+        return {x for x in chain(cls.required_cols, cls.optional_cols)}
 
     @classmethod
     def id_col_property(cls):
-        return getattr(cls.table_class, cls.id_column)
+        return getattr(cls.table_class, cls.table_class.id_column)
 
     @classmethod
     def col_property(cls, column_name):
         return getattr(cls.table_class, column_name)
 
-    def to_db_row(self):
+    def create_db_row(self):
         """ Create ORM instance """
         func_params = self.table_class.__init__.__code__.co_varnames[1:]
         print(func_params)
         args = [getattr(self, name) for name in func_params]
         row = self.table_class(*args)
-        for col in self.update_columns:
-            if col not in func_params and col is not None:
+        for col in self.columns_for_update():
+            if col not in func_params:
                 setattr(row, col, getattr(self, col))
         return row
 
@@ -55,7 +72,7 @@ class MappedBase(ABC):
 
         :rtype: int
         """
-        return getattr(self, self.id_column)
+        return getattr(self, self.table_class.id_column)
 
     @row_id.setter
     def row_id(self, val):
@@ -63,10 +80,10 @@ class MappedBase(ABC):
 
         :param int val: new ID
         """
-        setattr(self, self.id_column, val)
+        setattr(self, self.table_class.id_column, val)
 
     @classmethod
-    def _get_row_by_id(cls, row_id, session=None):
+    def _get_row_by_id(cls, row_id, session):
         """ Retrieve the ORM instance to the given ID.
 
         :param int row_id: ID value
@@ -74,42 +91,10 @@ class MappedBase(ABC):
         :return: ORM instance
         :raises: UnknownId
         """
-        if session is not None:
-            row = session.query(cls.table_class).filter(cls.id_col_property() == row_id).first()
-        else:
-            with database.make_session() as session:
-                row = session.query(cls.table_class).filter(cls.id_col_property() == row_id).first()
+        row = session.query(cls.table_class).filter(cls.id_col_property() == row_id).first()
         if row is None:
             raise UnknownId('unknown id for %s: %i' % (cls.table_class.__tablename__, row_id))
         return row
-
-    def _verify_exists(self, session):
-        """ Verify the current instance already has a related database row.
-
-        :raises: ValueError
-        """
-        row = session.query(self.table_class) \
-            .filter(and_(self.id_col_property() == self.row_id,
-                         *(self.col_property(col) == getattr(self, col) for col in self.unique_columns)
-                         )) \
-            .first()
-        if row is None:
-            raise ValueError('could not find given entry with ID %i in database %s!' %
-                             (self.row_id, self.table_class.__tablename__))
-        return
-
-    def _check_collision(self, session):
-        """ Check if any of the unique fields collides with other table entries.
-
-        :raises: ValueError
-        """
-        if not len(self.unique_columns):
-            return
-        row = session.query(self.table_class) \
-            .filter(and_(*(self.col_property(col) == getattr(self, col) for col in self.unique_columns))) \
-            .first()
-        if row is not None:
-            raise ValueError('found colliding row with ID %i' % getattr(row, self.id_column))
 
     @classmethod
     def _create_and_get_id(cls, session, row):
@@ -123,30 +108,26 @@ class MappedBase(ABC):
         session.add(row)
         session.flush()
         session.refresh(row)
-        return getattr(row, cls.id_column)
+        return getattr(row, cls.table_class.id_column)
 
     def _create_db_entry(self, session):
         """ Verifies that the given ID is valid, or creates a new row, if it is empty. """
-        # if id exists, check if it has the same name
         if self.row_id:
-            self._verify_exists(session)
             return
-        # else check if there is a name collision
-        self._check_collision(session)
         # write and set project ID
-        row = self.to_db_row()
+        row = self.create_db_row()
         self.row_id = self._create_and_get_id(session, row)
         assert self.row_id is not None, 'id field is None!'
 
     def update_db(self, session):
         row = self._get_row_by_id(self.row_id, session)
-        for col in self.update_columns:
+        for col in self.columns_for_update():
             this_val = getattr(self, col)
-            if this_val is not None and this_val != getattr(row, col):
+            if this_val != getattr(row, col):
                 setattr(row, col, getattr(self, col))
 
     @classmethod
-    def from_db(cls, row_id=None, row=None, session=None):
+    def from_db(cls, session, row_id=None, row=None):
         """ Create instance from database row ID or row """
         assert row_id or row
         row = row or cls._get_row_by_id(row_id, session=session)
@@ -158,74 +139,138 @@ class MappedBase(ABC):
 class Project(MappedBase):
 
     table_class = TabProject
-    id_column = 'project_id'
-    unique_columns = {'name'}
-    update_columns = {'name', 'base_path', 'vault'}
+    optional_cols = ['vault', table_class.id_column]
+    required_cols = ['base_path', 'name']
 
-    def __init__(self, name, base_path, vault=None, project_id=None):
-        self.name = name
-        self.base_path = os.path.abspath(base_path)
-        self.vault = vault
-        self.project_id = project_id
-        with database.make_session() as session:
-            self._create_db_entry(session)
+    def __init__(self, **kwargs):
+        self.name = None
+        self.base_path = None
+        self.vault = None
+        self.project_id = None
+        if kwargs.get('base_path'):
+            kwargs['base_path'] = os.path.abspath(kwargs['base_path'])
+        super(Project, self).__init__(**kwargs)
         self.files = {}  # relative path as key -> easier folder comparison
 
     def load_files(self, session):
         file_rows = session.query(TabFile)\
             .filter(TabFile.outdated == False, TabFile.project_id == self.project_id)\
             .all()
-        loaded_files = {row.path: File.from_db(None, row, session=session) for row in file_rows}
+        loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
-        # ToDo: check for new files in folders
+        self.update_folders()
+
+    def update_folders(self):
+        for file in self.files.values():
+            if not file.is_folder:
+                continue
+            self.update_folder(file)
+
+    def update_folder(self, file):
+        paths = [self._to_relative_path(x) for x in glob.glob(os.path.join(self.base_path, file.path, '*'))]
+        # ignore known stuff. its subfolders are handled by another loop run in self.update_folders
+        paths = [x for x in paths if x not in self.files]
+        if not len(paths):
+            return
+        files = self.add_files(paths, update=False)
+        for file in files:
+            if file.is_folder:
+                self.update_folder(file)
 
     def add_file(self, path):
-        path = os.path.abspath(path)
-        assert os.path.commonpath([path, self.base_path]) == self.base_path
-        relative_path = os.path.relpath(path, self.base_path)
+        path, relative_path = self._to_relative_path(path)
         if relative_path in self.files:
             return None
         file = File(
-            os.path.basename(path),
-            relative_path,
-            self.project_id,
+            name=os.path.basename(path),
+            path=relative_path,
+            project_id=self.project_id,
             is_folder=os.path.isdir(path)
         )
         self.files[relative_path] = file
         return file
 
-    def add_files(self, paths):
+    def _to_relative_path(self, path):
+        path = os.path.abspath(path)
+        assert os.path.commonpath([path, self.base_path]) == self.base_path
+        relative_path = os.path.relpath(path, self.base_path)
+        return path, relative_path
+
+    def add_files(self, paths, update=True):
+        files = []
         for path in paths:
             file = self.add_file(path)
-            if file is None or not file.is_folder:
-                continue
-            self.refresh_folder(path)
+            if file is not None:
+                files.append(file)
+        if update:
+            self.update_folders()
+        return files
 
 
 class File(MappedBase):
 
     table_class = TabFile
     id_column = 'file_id'
-    update_columns = ('name', 'path', 'is_folder', 'size', 'outdated', 'project_id', 'project')
+    nullable = [id_column, 'size']
+    non_nullable = ['name', 'path', 'project_id']
+    default_values = {'is_folder': False, 'outdated': False}
 
-    def __init__(self, name, path, project_id, file_id=None, size=None, is_folder=False, outdated=False):
+    def __init__(self, **kwargs):
         """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
         of ORM-class. """
-        self.file_id = file_id
-        self.name = name
-        self.path = path
-        self.project_id = project_id
-        self.is_folder = is_folder
-        self.size = size
-        self.outdated = outdated
-        with database.make_session() as session:
-            self._create_db_entry(session)
+        self.file_id = None
+        self.name = None
+        self.path = None
+        self.project_id = None
+        self.is_folder = None
+        self.size = None
+        self.outdated = None
+        super(File, self).__init__(**kwargs)
 
     def set_size(self, base_path):
         if self.is_folder:
             return
         self.size = get_file_size(os.path.join(base_path, self.path))
 
+
+class DerivedKeySetup(MappedBase):
+
+    table_class = TabDerivedKeySetup  # ORM class
+    id_column = 'derived_key_setup_id'  # name of the ID in this class, and the property of the ORM class
+    unique_columns = []  # columns that have a unique constraint. Checked on creation.
+    nullable = [id_column]
+    non_nullable = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
+    default_values = {'key_size_sig': 0, 'salt_key_sig'}
+
+    def __init__(self, *args, **kwargs):
+
+
+
+class Chunk(MappedBase):
+
+    table_class = TabChunk
+    id_column = 'chunk_id'
+    nullalbe = [id_column, 'upload_id', 'checksum', 'signature_type', 'signature', 'verify_key', 'derived_key_setup_id']
+    non_nullable = ['start_offset', 'size', 'encrypted', 'file_id']
+    default_values = {'is_folder': False, 'outdated': False}
+
+    def __init__(self, **kwargs):
+        """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
+        of ORM-class. """
+        self.chunk_id = None
+        self.upload_id = None
+        self.checksum = None
+        self.signature_type= None
+        self.signature = None
+        self.verify_key = None
+        self.derived_key_setup_id = None
+        self.start_offset = None
+        self.size = None
+        self.encrypted = None
+        self.file_id = None
+        self.is_folder = None
+        self.outdated = None
+        super(Chunk, self).__init__(**kwargs)
 
 # --------------------------------------------------------------------------------
 # old stuff
