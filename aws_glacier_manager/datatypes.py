@@ -2,16 +2,12 @@ import os
 import datetime
 import glob
 from contextlib import suppress
-from abc import ABC, abstractmethod
-from collections import OrderedDict, namedtuple
+from abc import ABC
 from itertools import chain
-import sqlite3
-from sqlalchemy import create_engine
 from . import database
 from .database import TabProject, TabFile, TabDerivedKeySetup, TabChunk, TabInventoryRequest, TabInventoryResponse
-from sqlalchemy.sql.expression import and_
+from sqlalchemy.sql.expression import null, func
 from nacl import pwhash, utils, secret
-from contextlib import contextmanager
 
 
 # the ORM-classes are in database.py. They should not be used by any classes outside of this module.
@@ -40,8 +36,12 @@ class MappedBase(ABC):
                 del kwargs[arg]
         if len(kwargs):
             raise AttributeError('unexpected attributes: %s' % [x for x in kwargs])
-        with database.make_session() as session:
-            self._create_db_entry(session)
+
+    def update_from(self, **kwargs):
+        for arg, val in kwargs.items():
+            if arg not in self.columns_for_update():
+                raise AttributeError('argument %s is unknown' % arg)
+            setattr(self, arg, val)
 
     @classmethod
     def columns_for_update(cls):
@@ -57,13 +57,9 @@ class MappedBase(ABC):
 
     def create_db_row(self):
         """ Create ORM instance """
-        func_params = self.table_class.__init__.__code__.co_varnames[1:]
-        print(func_params)
-        args = [getattr(self, name) for name in func_params]
-        row = self.table_class(*args)
-        for col in self.columns_for_update():
-            if col not in func_params:
-                setattr(row, col, getattr(self, col))
+        colnames = self.table_class.__table__.columns.keys()
+        kwargs = {name: getattr(self, name) for name in colnames}
+        row = self.table_class(**kwargs)
         return row
 
     @property
@@ -110,7 +106,7 @@ class MappedBase(ABC):
         session.refresh(row)
         return getattr(row, cls.table_class.id_column)
 
-    def _create_db_entry(self, session):
+    def create_db_entry(self, session):
         """ Verifies that the given ID is valid, or creates a new row, if it is empty. """
         if self.row_id:
             return
@@ -131,9 +127,9 @@ class MappedBase(ABC):
         """ Create instance from database row ID or row """
         assert row_id or row
         row = row or cls._get_row_by_id(row_id, session=session)
-        func_params = cls.table_class.__init__.__code__.co_varnames[1:]
-        args = [getattr(row, name) for name in func_params]
-        return cls(*args)
+        colnames = cls.table_class.__table__.columns.keys()
+        kwargs = {name: getattr(row, name) for name in colnames}
+        return cls(**kwargs)
 
 
 class Project(MappedBase):
@@ -154,7 +150,7 @@ class Project(MappedBase):
 
     def load_files(self, session):
         file_rows = session.query(TabFile)\
-            .filter(TabFile.outdated == False, TabFile.project_id == self.project_id)\
+            .filter(not TabFile.outdated, TabFile.project_id == self.project_id)\
             .all()
         loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
@@ -187,6 +183,8 @@ class Project(MappedBase):
             project_id=self.project_id,
             is_folder=os.path.isdir(path)
         )
+        if not file.is_folder:
+            file.set_size(self.base_path)
         self.files[relative_path] = file
         return file
 
@@ -198,22 +196,27 @@ class Project(MappedBase):
 
     def add_files(self, paths, update=True):
         files = []
-        for path in paths:
-            file = self.add_file(path)
-            if file is not None:
-                files.append(file)
+        with database.make_session() as session:
+            for path in paths:
+                file = self.add_file(path)
+                if file is not None:
+                    file.create_db_entry(session)
+                    files.append(file)
         if update:
             self.update_folders()
         return files
+
+    @classmethod
+    def load_all(cls):
+        with database.make_session() as session:
+            return [cls.from_db(session, row=row) for row in session.query(cls.table_class).all()]
 
 
 class File(MappedBase):
 
     table_class = TabFile
-    id_column = 'file_id'
-    nullable = [id_column, 'size']
-    non_nullable = ['name', 'path', 'project_id']
-    default_values = {'is_folder': False, 'outdated': False}
+    optional_cols = ['is_folder', 'size', 'outdated', table_class.id_column]
+    required_cols = ['path', 'name', 'project_id']
 
     def __init__(self, **kwargs):
         """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
@@ -226,33 +229,31 @@ class File(MappedBase):
         self.size = None
         self.outdated = None
         super(File, self).__init__(**kwargs)
+        self.chunks = None
 
     def set_size(self, base_path):
         if self.is_folder:
             return
         self.size = get_file_size(os.path.join(base_path, self.path))
 
-
-class DerivedKeySetup(MappedBase):
-
-    table_class = TabDerivedKeySetup  # ORM class
-    id_column = 'derived_key_setup_id'  # name of the ID in this class, and the property of the ORM class
-    unique_columns = []  # columns that have a unique constraint. Checked on creation.
-    nullable = [id_column]
-    non_nullable = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
-    default_values = {'key_size_sig': 0, 'salt_key_sig'}
-
-    def __init__(self, *args, **kwargs):
-
+    def load_chunks(self, session):
+        if not self.file_id:
+            raise RuntimeError('file does not have an ID!')
+        chunk_rows = session.query(TabChunk)\
+            .filter(TabChunk.file_id == self.file_id)\
+            .all()
+        loaded_chunks = [Chunk.from_db(session, row=row) for row in chunk_rows]
+        if sum(x.size for x in loaded_chunks) != self.size:
+            raise ValueError('Chunk size invalid!')
+        self.chunks = loaded_chunks
 
 
 class Chunk(MappedBase):
 
     table_class = TabChunk
-    id_column = 'chunk_id'
-    nullalbe = [id_column, 'upload_id', 'checksum', 'signature_type', 'signature', 'verify_key', 'derived_key_setup_id']
-    non_nullable = ['start_offset', 'size', 'encrypted', 'file_id']
-    default_values = {'is_folder': False, 'outdated': False}
+    optional_cols = [table_class.id_column, 'upload_id', 'checksum', 'signature_type', 'signature',
+                     'verify_key', 'derived_key_setup_id', 'encrypted']
+    required_cols = ['start_offset', 'size', 'file_id']
 
     def __init__(self, **kwargs):
         """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
@@ -260,7 +261,7 @@ class Chunk(MappedBase):
         self.chunk_id = None
         self.upload_id = None
         self.checksum = None
-        self.signature_type= None
+        self.signature_type = None
         self.signature = None
         self.verify_key = None
         self.derived_key_setup_id = None
@@ -268,58 +269,33 @@ class Chunk(MappedBase):
         self.size = None
         self.encrypted = None
         self.file_id = None
-        self.is_folder = None
-        self.outdated = None
         super(Chunk, self).__init__(**kwargs)
+        self.derived_key_setup = None
 
-# --------------------------------------------------------------------------------
-# old stuff
+    def load_derived_key_setup(self, session):
+        if not self.derived_key_setup_id:
+            raise RuntimeError('chunk does not have an ID for derived key setup!')
+        self.derived_key_setup = session.query(TabDerivedKeySetup)\
+            .filter(TabDerivedKeySetup.id_col_property() == self.derived_key_setup_id)\
+            .first()
 
-class DerivedKeySetup:
-    
-    _item_names = 'ops', 'mem', 'construct', 'salt_key_enc', 'salt_key_sig', 'key_size_enc', 'key_size_sig'
 
-    def __init__(self, ops, mem, construct, salt_key_enc, salt_key_sig, key_size_enc, key_size_sig):
-        self.ops = ops
-        self.mem = mem
-        self.construct = construct
-        self.salt_key_enc = salt_key_enc
-        self.salt_key_sig = salt_key_sig
-        self.key_size_enc = key_size_enc
-        self.key_size_sig = key_size_sig
+class DerivedKeySetup(MappedBase):
 
-    def __repr__(self):
-        return repr('DerivedKeySetup(%s)' % ','.join('%s=%r' % (x, self[x]) for x in self._item_names))
-    
-    def __getitem__(self, item):
-        return getattr(self, item)
+    table_class = TabDerivedKeySetup
+    optional_cols = [table_class.id_column, 'key_size_sig', 'salt_key_sig']
+    required_cols = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
 
-    @classmethod
-    def db_columns(cls):
-        return ', '.join(cls._item_names)
-    
-    def to_db_tuple(self):
-        return (
-            self.ops,
-            self.mem,
-            self.construct,
-            self.key_size_enc,
-            self.key_size_sig,
-            self.salt_key_enc,
-            self.salt_key_sig
-        )
-
-    @classmethod
-    def from_db_tuple(cls, db_tuple):
-        return cls(
-            ops=db_tuple[0],
-            mem=db_tuple[1],
-            construct=db_tuple[2],
-            key_size_enc=db_tuple[3],
-            key_size_sig=db_tuple[4],
-            salt_key_enc=db_tuple[5],
-            salt_key_sig=db_tuple[6]
-        )
+    def __init__(self, **kwargs):
+        self.derived_key_setup_id = None
+        self.construct = None
+        self.ops = None
+        self.mem = None
+        self.key_size_enc = None
+        self.key_size_sig = None
+        self.salt_key_enc = None
+        self.salt_key_sig = None
+        super(DerivedKeySetup, self).__init__(**kwargs)
 
     @classmethod
     def create_default(cls, enable_auth_key=False):
@@ -340,348 +316,103 @@ class DerivedKeySetup:
         )
 
 
-DerivedKeys = namedtuple('DerivedKeys', ['key_enc', 'key_sig', 'setup'])
+# ToDo: add handler class for projects and files
+
+class InventoryRequest(MappedBase):
+
+    table_class = TabInventoryRequest
+    required_cols = ['vault_name', 'sent_dt', 'job_id']
+    optional_cols = [table_class.id_column]
+
+    def __init__(self, **kwargs):
+        self.request_id = None
+        self.vault_name = None
+        self.sent_dt = None
+        self.job_id = None
+        super(InventoryRequest, self).__init__(**kwargs)
 
 
-ProjectInfo = namedtuple('ProjectInfo', 'name base_path num_files')
+class InventoryResponse(MappedBase):
+
+    table_class = TabInventoryResponse
+    required_cols = ['retrieved_dt', 'request_id']
+    optional_cols = [table_class.id_column, 'content_type', 'status', 'body']
+
+    def __init__(self, **kwargs):
+        self.response_id = None
+        self.request_id = None
+        self.retrieved_dt = None
+        self.content_type = None
+        self.status = None
+        self.body = None
+        super(InventoryResponse, self).__init__(**kwargs)
 
 
-class Constraint:
+class InventoryHandler:
 
-    def __init__(self, this_column, other_table, other_column):
-        self.this_column = this_column
-        self.other_table = other_table
-        self.other_column = other_column
-
-    @property
-    def fk_statement(self):
-        return 'FOREIGN KEY ({this_column}) REFERENCES {other_table} ({other_column})'.format(
-            other_table=self.other_table,
-            other_column=self.other_column,
-            this_column=self.this_column
-        )
-
-    def get_constraint(self, tablename):
-        return 'CONSTRAINT fk_{t}_{other_table}_{other_column} {fk_statement}'.format(
-            t=tablename,
-            other_table=self.other_table,
-            other_column=self.other_column,
-            fk_statement=self.fk_statement
-        )
-
-
-class ConstraintIdentical(Constraint):
-
-    def __init__(self, column, other_table):
-        super(ConstraintIdentical, self).__init__(column, other_table, column)
-
-
-class ConstraintUniqueIdx(Constraint):
-
-    def __init__(self, column):
-        super(ConstraintUniqueIdx, self).__init__(None, None, None)
-        self.column = column
-
-    def fk_statement(self):
-        return None
-
-    def get_constraint(self, tablename):
-        return 'CONSTRAINT "uix_%s" UNIQUE (%s)' % (self.column, self.column)
-
-
-class SQLiteLog(ABC):
-
-    TABLE_DEF = OrderedDict([])
-    TABLE_FK = {}
-    DEFAULT_FILENAME = None
-
-    def __init__(self, filename=None):
-        self.filename = filename or self.DEFAULT_FILENAME
-        if self.filename is None:
-            raise NotImplementedError('Your derived class can not handle empty filenames!')
-        self.init_db()
-
-    @contextmanager
-    def connect(self):
-        with sqlite3.Connection(database=self.filename) as con:
-            yield con
-
-    def init_db(self):
-        with self.connect() as con:
-            cur = con.cursor()
-            for tablename, coldefs in self.TABLE_DEF.items():
-                elements = ['%s %s' % (x, y) for x, y in coldefs.items()]
-                for foreign_key in self.TABLE_FK.get(tablename, []):
-                    elements.append(foreign_key.get_constraint(tablename))
-                cur.execute('CREATE TABLE IF NOT EXISTS %s (%s)' % (
-                    tablename,
-                    ', '.join(elements)
-                ))
-
-
-class BackupLogOld(SQLiteLog):
-
-    TABLE_DEF = OrderedDict([
-        ('project', OrderedDict([
-            ('project_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('name', 'TEXT NOT NULL'),
-            ('base_path', 'TEXT NOT NULL')
-        ])),
-        ('file', OrderedDict([
-            ('file_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('is_folder', 'INTEGER DEFAULT 0'),
-            ('name', 'TEXT NOT NULL'),
-            ('path', 'TEXT NOT NULL'),
-            ('size', 'INTEGER NOT NULL'),
-            ('outdated', 'INTEGER DEFAULT 0'),
-            ('project_id', 'INTEGER')
-        ])),
-        ('derived_key_setup', OrderedDict([
-            ('derived_key_setup_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('construct', 'TEXT'),
-            ('ops', 'INTEGER'),
-            ('mem', 'INTEGER'),
-            ('key_size_enc', 'INTEGER'),
-            ('key_size_sig', 'INTEGER'),
-            ('salt_key_enc', 'BLOB'),
-            ('salt_key_sig', 'BLOB')
-        ])),
-        ('chunk', OrderedDict([
-            ('chunk_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('upload_id', 'TEXT'),
-            ('checksum', 'TEXT'),
-            ('signature_type', 'TEXT'),
-            ('signature', 'BLOB'),
-            ('verify_key', 'BLOB'),
-            ('start_offset', 'INTEGER NOT NULL'),
-            ('size', 'INTEGER NOT NULL'),
-            ('encrypted', 'INTEGER DEFAULT 0'),
-            ('derived_key_setup_id', 'INTEGER'),
-            ('file_id', 'INTEGER')
-        ])),
-    ])
-    TABLE_FK = {
-        'project': [ConstraintUniqueIdx('name')],
-        'file': [ConstraintIdentical('project_id', 'project')],
-        'chunk': [ConstraintIdentical('file_id', 'file')]
-    }
-
-
-class DBHandler:
-
-    def __init__(self, connector_str, timeout_minutes=9):
-        self.connector_str = connector_str
-        self.timeout = datetime.timedelta(minutes=timeout_minutes)
-        self._connection = None
-        self._last_access = None
-
-    @property
-    def connection(self):
-        if self._connection is None or self._last_access is None or \
-                self._last_access + self.timeout < datetime.datetime.utcnow():
-            self._connection = create_engine(self.connector_str, echo=True)
-        self._last_access = datetime.datetime.utcnow()
-        return self._connection
-
-
-class BackupLog:
-    DEFAULT_CONNECTOR_STRING = 'sqlite:///backup_log.sqlite'
-
-    def __init__(self, project, base_path='/', connector_str=None, project_id=None):
-        self.project = project
-        self.base_path = base_path
-        self.session_context = SessionContext(connector_str or self.DEFAULT_CONNECTOR_STRING)
-        datatypes.BackupLogBase.metadata.create_all(bind=self.session_context.engine)
-        self.id = project_id
-        self._create_db_entry()
-
-    @classmethod
-    def get_project_row_by_name(cls, name, session):
-        return session.query(datatypes.TabProject).filter_by(name=name).one()
-
-    @classmethod
-    def from_db_entry(cls, project_name, connector_str=None):
-        session_context = SessionContext(connector_str or cls.DEFAULT_CONNECTOR_STRING)
-        with session_context() as session:
-            project = cls.get_project_row_by_name(project_name, session)
-            if project is None:
-                return None
-            project = cls(project.name, project.base_path, connector_str, project_id=project.projecct_id)
-        return project
-
-    def _create_db_entry(self):
-        with self.session_context() as session:
-            if self.id is not None:
-                # verify, that the id exists and return
-                if session.query(datatypes.TabProject).filter_by(project_id=self.id).one() is None:
-                    raise ValueError('Given project_id does not exist.')
-                return
-            # create the entry and set id
-            project =
-
-    def create(self):
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT project_id FROM project WHERE name = ?', (self.project,))
-            if len(cur.fetchall()):
-                raise RuntimeError('project %s already exists!' % self.project)
-            cur.execute('INSERT INTO project (name, base_path) VALUES (?, ?)', (self.project, self.base_path))
-
-    def add_file(self, recursive=True):
-        """ Add a file to the database. If it is a directory, descend. Should not follow symlinks to folders.
-
-        This must be either complex or handled externally. Having directories and files is not a trivial task,
-        as a directory may expand to more files over time, or files might be excluded from a directory"""
-        pass
-
-    def get_files_for_upload(self):
-        """ Get list of stored files, for uploading, i.e. verify that they are unmodified and not uploaded yet."""
-        pass
-
-    def define_chunks(self, file):
-        """ Create chunk information for a file. """
-        pass
-
-    def add_derived_key_setup(self, setup):
-        """ Add a key derivation setup.
-
-        :param DerivedKeySetup setup: key derivation settings
-        :returns table entry ID
-        :rtype: int
-        """
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute(
-                'INSERT INTO derived_key_setup (%s) VALUES '
-                '(?, ?, ?, ?, ?, ?, ?)' % setup.db_columns(), setup.to_db_tuple()
-            )
-            cur.execute('SELECT last_insert_rowid() FROM derived_key_setup')
-            entry_id = cur.fetchall()[0][0]
-        return entry_id
-
-    def get_derived_key_setup(self, entry_id):
-        """ Retrieve a key derivation setup from the database.
-
-        :param int entry_id: row ID
-        :rtype: DerivedKeySetup
-        """
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute(
-                'SELECT %s FROM derived_key_setup WHERE derived_key_setup_id = %i' %
-                (DerivedKeySetup.db_columns(), entry_id)
-            )
-            setup = cur.fetchall()[0]
-        return DerivedKeySetup.from_db_tuple(setup)
-
-
-class InventoryLog(SQLiteLog):
-
-    TABLE_DEF = OrderedDict([
-        ('request', OrderedDict([
-            ('request_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('vault_name', 'TEXT NOT NULL'),
-            ('sent_dt', 'TEXT NOT NULL'),
-            ('job_id', 'TEXT NOT NULL')
-        ])),
-        ('response', OrderedDict([
-            ('response_id', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
-            ('retrieved_dt', 'TEXT NOT NULL'),
-            ('content_type', 'TEXT'),
-            ('status', 'INTEGER'),
-            ('body', 'BLOB'),
-            ('request_id', 'INTEGER')
-        ]))
-    ])
-    TABLE_FK = {
-        'response': [ConstraintIdentical('request_id', 'request')]
-    }
-    DEFAULT_FILENAME = 'inventory_log.sqlite'
-    RequestRow = namedtuple('RequestRow', list(TABLE_DEF['request'].keys()))
-    ResponseRow = namedtuple('ResponseRow', list(TABLE_DEF['response'].keys()) + ['sent_dt'])
-
-    def __init__(self, vault_name, filename=None):
+    def __init__(self, vault_name):
         self.vault_name = vault_name
-        super(InventoryLog, self).__init__(filename=filename)
 
     def store_request(self, request_dict):
         job_id = request_dict['jobId']
-        sent_dt = datetime.datetime.utcnow().isoformat()
-        with self.connect() as con:
-            con.execute('INSERT INTO request (vault_name, sent_dt, job_id) VALUES (?, ?, ?)',
-                        (self.vault_name, sent_dt, job_id))
+        sent_dt = datetime.datetime.utcnow()
+        request = InventoryRequest(
+            vault_name=self.vault_name,
+            sent_dt=sent_dt,
+            job_id=job_id
+        )
+        with database.make_session() as session:
+            request.create_db_entry(session)
+        return request
 
-    def store_response(self, request_id, response_dict):
-        retrieved_dt = datetime.datetime.utcnow().isoformat()
-        content_type = response_dict['contentType']
-        status = response_dict['status']
-        body = response_dict['body'].read()
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT response_id FROM response WHERE request_id = %i' % request_id)
-            result = cur.fetchall()
-            # replace already existing responses for this request_id
-            if len(result):
-                con.execute(
-                    'INSERT OR REPLACE INTO response ('
-                    'response_id, retrieved_dt, content_type, status, body, request_id) '
-                    'VALUES (?, ?, ?, ?, ?, ?)', (
-                        result[0][0], retrieved_dt, content_type, status, body, request_id
-                    )
-                )
+    @staticmethod
+    def store_response(request_id, response_dict):
+        kwargs = {
+            'retrieved_dt': datetime.datetime.utcnow(),
+            'content_type': response_dict['contentType'],
+            'status': response_dict['status'],
+            'body': response_dict['body'].read(),
+            'request_id': request_id
+        }
+        with database.make_session() as session:
+            response_row = session.query(TabInventoryResponse)\
+                .filter(TabInventoryResponse.request_id == request_id)\
+                .first()
+            if response_row is None:
+                response = InventoryResponse(**kwargs)
+                response.create_db_entry(session)
             else:
-                con.execute(
-                    'INSERT INTO response ('
-                    'retrieved_dt, content_type, status, body, request_id) '
-                    'VALUES (?, ?, ?, ?, ?)', (
-                        retrieved_dt, content_type, status, body, request_id
-                    )
-                )
+                response = InventoryResponse.from_db(session, row=response_row)
+                response.update_from(**kwargs)
+                response.update_db(session)
+        return response
 
     def get_open_requests(self):
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT a.* FROM request a LEFT JOIN response b USING(request_id) '
-                        'WHERE retrieved_dt IS NULL AND vault_name = "%s"' % self.vault_name)
-            result = cur.fetchall()
-            open_requests = [self.RequestRow(*row) for row in result]
-        return open_requests
+        with database.make_session() as session:
+            requests = session.query(TabInventoryRequest)\
+                .outerjoin(TabInventoryRequest.response)\
+                .filter(
+                TabInventoryRequest.vault_name == self.vault_name,
+                TabInventoryResponse.response_id == null()).all()
+            return [InventoryRequest.from_db(session, row=row) for row in requests or []]
 
     def get_latest_response(self):
-        with self.connect() as con:
-            cur = con.cursor()
-            cur.execute('CREATE TEMP TABLE tmp_req AS '
-                        'SELECT MAX(sent_dt) AS sent_dt FROM request a '
-                        'LEFT JOIN response b USING(request_id) '
-                        'WHERE vault_name = "%s" AND retrieved_dt IS NOT NULL'
-                        % self.vault_name)
-            cur.execute('''\
-            SELECT 
-                b.*, 
-                a.sent_dt 
-            FROM response b 
-            JOIN request a USING(request_id)
-            JOIN tmp_req c USING(sent_dt)
-            LIMIT 1''')
-            responses = cur.fetchall()
-            if not len(responses):
+        with database.make_session() as session:
+            latest_response = session.query(func.max(TabInventoryRequest.sent_dt))\
+                .join(TabInventoryRequest.response)\
+                .filter(
+                TabInventoryRequest.vault_name == self.vault_name,
+                TabInventoryResponse.response_id != null()
+            ).scalar()
+            if latest_response is None:
                 return None
-            last_response = self.ResponseRow(*responses[0])
-            return last_response
-
-
-def get_projects_for_file(filename):
-    if not os.path.exists(filename):
-        return []
-    else:
-        with sqlite3.Connection(database=filename) as con:
-            cur = con.cursor()
-            cur.execute('SELECT project.name, '
-                        'project.base_path, '
-                        'COUNT(file_id) AS num_files '
-                        'FROM project LEFT JOIN file USING(project_id) '
-                        'GROUP BY project_id')
-            return [ProjectInfo(*x) for x in cur.fetchall()]
+            latest_response = session.query(TabInventoryResponse)\
+                .join(TabInventoryResponse.request)\
+                .filter(
+                TabInventoryRequest.vault_name == self.vault_name,
+                TabInventoryRequest.sent_dt == latest_response).first()
+            if latest_response is not None:
+                return InventoryResponse.from_db(session, row=latest_response)
 
 
 def get_file_size(filepath):

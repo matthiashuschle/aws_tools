@@ -2,6 +2,7 @@
 
 The Definitions are used by classes in datatypes.py
 """
+import warnings
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Boolean, Binary, ForeignKey, DateTime
@@ -50,7 +51,7 @@ class TabFile(BackupLogBase):
     size = Column(Integer)
     outdated = Column(Boolean, default=False)
     project_id = Column(Integer, ForeignKey('project.project_id'), nullable=False)
-    project = relationship("TabProject", back_populates="file")
+    project = relationship("TabProject", back_populates="files")
 
 
 TabProject.files = relationship('TabFile', order_by=TabFile.file_id, back_populates="project")
@@ -84,9 +85,9 @@ class TabChunk(BackupLogBase):
     size = Column(Integer, nullable=False)
     encrypted = Column(Boolean, default=False)
     derived_key_setup_id = Column(Integer, ForeignKey('derived_key_setup.derived_key_setup_id'))
-    derived_key_setup = relationship('TabDerivedKeySetup', back_populates='chunk')
+    derived_key_setup = relationship('TabDerivedKeySetup', back_populates='chunks')
     file_id = Column(Integer, ForeignKey('file.file_id'), nullable=False)
-    file = relationship('TabFile', back_populates='chunk')
+    file = relationship('TabFile', back_populates='chunks')
 
 
 TabDerivedKeySetup.chunks = relationship('TabChunk', order_by=TabChunk.chunk_id, back_populates="derived_key_setup")
@@ -110,8 +111,8 @@ class TabInventoryResponse(BackupLogBase):
     id_column = 'response_id'
 
     response_id = Column(Integer, primary_key=True, autoincrement=True)
-    request_id = Column(Integer, ForeignKey('inventory_request.request_id'))
-    request = relationship('TabInventoryRequest', back_populates='inventory_response')
+    request_id = Column(Integer, ForeignKey('inventory_request.request_id'), nullable=False)
+    request = relationship('TabInventoryRequest', back_populates='response')
     retrieved_dt = Column(DateTime, nullable=False)
     content_type = Column(String)
     status = Column(Integer)
@@ -148,3 +149,15 @@ class SessionContext:
 
 
 make_session = SessionContext()
+
+
+def create_tables():
+    BackupLogBase.metadata.create_all(make_session.engine)
+    warnings.warn('created tables with engine %s' % make_session.engine)
+
+
+def set_test():
+    global make_session
+    config.load_test()
+    make_session = SessionContext()
+    create_tables()

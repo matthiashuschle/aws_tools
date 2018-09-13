@@ -152,6 +152,45 @@ def test_creation_3():
         print(row is None)
 
 
+def test_fk_1():
+    if os.path.isfile(DBFILE):
+        os.remove(DBFILE)
+
+    Base = declarative_base()
+
+    class TabTestA(Base):
+        __tablename__ = 'test_a'
+        id_field = Column(Integer, primary_key=True, autoincrement=True)
+        tfield = Column(String)
+
+    class TabTestB(Base):
+        __tablename__ = 'test_b'
+        id_field = Column(Integer, primary_key=True, autoincrement=True)
+        fk_id = Column(Integer, ForeignKey('test_a.id_field'))
+        test_a = relationship('TabTestA', back_populates='test_b')
+
+    TabTestA.test_b = relationship('TabTestB', order_by=TabTestB.id_field, back_populates="test_a")
+
+    Base.metadata.create_all(make_session.engine)
+
+    row = TabTestA(tfield='abc')
+    row_b_1 = TabTestB(fk_id=1)
+    row_b_2 = TabTestB(fk_id=1)
+
+    with make_session() as session:
+        session.add(row)
+        session.add(row_b_1)
+        session.add(row_b_2)
+        session.flush()
+        session.refresh(row)
+        session.refresh(row_b_1)
+        session.refresh(row_b_2)
+        print(row.id_field, row.tfield, row.test_b)
+        print(row_b_1.id_field, row_b_1.test_a)
+        print(row_b_2.id_field, row_b_2.test_a)
+
+
 if __name__ == '__main__':
-    #base_test()
-    test_creation_2()
+    # base_test()
+    # test_creation_2()
+    test_fk_1()

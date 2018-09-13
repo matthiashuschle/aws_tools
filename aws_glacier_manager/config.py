@@ -1,6 +1,6 @@
 import os
 import configparser
-import copy
+import warnings
 
 CONFIG_FILE = 'config.ini'
 _DEFAULT = {
@@ -16,32 +16,30 @@ config = None
 
 def load(file=CONFIG_FILE):
     global config
-    config = copy.deepcopy(_DEFAULT)
-    parser = configparser.ConfigParser()
-    if os.path.isfile(file):
-        parser.read(file)
-        print('loaded %s' % file)
-    for section, settings in parser.items():
-        if section not in config:
-            config[section] = settings
-        else:
-            for key, val in settings.items():
-                config[section][key] = settings.get(key, val)
-
-
-def load2(file=CONFIG_FILE):
-    global config
     config = configparser.ConfigParser()
     if os.path.isfile(file):
         config.read(file)
-        print('loaded %s' % file)
+        warnings.warn('loaded %s' % file)
     for section, settings in _DEFAULT.items():
         if section not in config:
             config[section] = settings
         else:
             for key, val in settings.items():
                 config[section][key] = settings.get(key, val)
+    warnings.warn(repr(config))
 
-print('foo')
-load2()
-print(config)
+
+def load_test():
+    global _DEFAULT
+    _DEFAULT = {
+        'vault': {
+            'name': 'testvault'
+        },
+        'database': {
+            'connector': 'sqlite:///_unittest.sqlite'
+        }
+    }
+    load()
+
+
+load()
