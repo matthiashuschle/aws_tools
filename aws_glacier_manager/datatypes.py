@@ -1,5 +1,6 @@
 import os
 import datetime
+from collections import OrderedDict
 import glob
 from contextlib import suppress
 from abc import ABC
@@ -36,6 +37,7 @@ class MappedBase(ABC):
                 del kwargs[arg]
         if len(kwargs):
             raise AttributeError('unexpected attributes: %s' % [x for x in kwargs])
+        self.is_deleted = False
 
     def update_from(self, **kwargs):
         for arg, val in kwargs.items():
@@ -121,6 +123,11 @@ class MappedBase(ABC):
             this_val = getattr(self, col)
             if this_val != getattr(row, col):
                 setattr(row, col, getattr(self, col))
+
+    def remove_from_db(self, session):
+        assert not self.is_deleted, 'double deletion of id %s' % repr(self.row_id)
+        session.query(self.table_class).filter(self.id_col_property() == self.row_id).delete()
+        self.is_deleted = True
 
     @classmethod
     def from_db(cls, session, row_id=None, row=None):
@@ -211,6 +218,17 @@ class Project(MappedBase):
         with database.make_session() as session:
             return [cls.from_db(session, row=row) for row in session.query(cls.table_class).all()]
 
+    def drop_files(self):
+        with database.make_session() as session:
+            for file in self.files:
+                file.remove_from_db(session)
+        self.files = {x: y for x, y in self.files.items() if not y.is_deleted}
+
+    def drop_file(self, file, session):
+        assert file.row_id in {x.row_id for x in self.files}
+        file.remove_from_db(session)
+        del self.files[file.path]
+
 
 class File(MappedBase):
 
@@ -245,7 +263,18 @@ class File(MappedBase):
         loaded_chunks = [Chunk.from_db(session, row=row) for row in chunk_rows]
         if sum(x.size for x in loaded_chunks) != self.size:
             raise ValueError('Chunk size invalid!')
-        self.chunks = loaded_chunks
+        self.chunks = to_ordered_dict({x.row_id: x for x in loaded_chunks})
+        
+    def drop_chunks(self):
+        with database.make_session() as session:
+            for chunk in self.chunks:
+                chunk.remove_from_db(session)
+        self.chunks = OrderedDict([x for x in self.chunks.items() if not x[1].is_deleted])
+        
+    def drop_chunk(self, chunk, session):
+        assert chunk.row_id in {x.row_id for x in self.chunks}
+        chunk.remove_from_db(session)
+        del self.chunks[chunk.row_id]
 
 
 class Chunk(MappedBase):
@@ -315,8 +344,6 @@ class DerivedKeySetup(MappedBase):
             key_size_sig=64 if enable_auth_key else 0
         )
 
-
-# ToDo: add handler class for projects and files
 
 class InventoryRequest(MappedBase):
 
@@ -417,3 +444,16 @@ class InventoryHandler:
 
 def get_file_size(filepath):
     return os.stat(filepath).st_size
+
+
+def to_ordered_dict(some_dict, **kwargs):
+    return OrderedDict([(key, some_dict[key]) for key in sorted(some_dict.keys(), **kwargs)])
+
+
+def get_overview():
+    """ Returns the basic project overview: pairs of (vault, name), sorted.
+
+    :rtype: list
+    """
+    projects = [x for x in sorted(Project.load_all(), key=lambda p: (p.vault, p.name))]
+    return projects

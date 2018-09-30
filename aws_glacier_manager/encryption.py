@@ -3,6 +3,7 @@ Handles encryption. Based on the awesome post of Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
 import os
+from collections import namedtuple
 import binascii
 import nacl.secret
 import nacl.utils
@@ -13,11 +14,12 @@ from nacl.exceptions import BadSignatureError
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.exceptions import InvalidSignature
-from .datatypes import DerivedKeySetup, DerivedKeys
+from .datatypes import DerivedKeySetup
 
 SYMKEY = 'symkey.bin'
 AUTHKEY = 'authkey.bin'
 CHUNK_SIZE = 16 * 1024
+DerivedKey = namedtuple('DerivedKey', ['key_enc', 'key_sig', 'setup'])
 
 
 def create_keys(out_path, replace=False):
@@ -64,7 +66,7 @@ def create_keys_from_password(password, setup=None, enable_auth_key=False):
                   opslimit=setup.ops, memlimit=setup.mem)
     key_sig = kdf(setup.key_size_sig, password, setup.salt_key_sig,
                   opslimit=setup.ops, memlimit=setup.mem) if setup.key_size_sig else b''
-    return DerivedKeys(
+    return DerivedKey(
         key_enc=key_enc,
         key_sig=key_sig,
         setup=setup)

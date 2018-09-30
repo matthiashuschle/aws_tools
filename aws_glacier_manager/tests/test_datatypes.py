@@ -1,5 +1,4 @@
 import os
-import sys
 from unittest import TestCase
 from io import BytesIO
 from .. import config
@@ -23,16 +22,12 @@ class DatabaseSetup(TestCase):
         assert 'unittest' in str(database.make_session.engine), 'wrong database: %s' % str(database.make_session.engine)
         cls.wipe_test_db()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.wipe_test_db()
-
     def setUp(self):
         self.wipe_test_db()
         database.create_tables()
 
-    def tearDown(self):
-        self.wipe_test_db()
+    def test_make_session(self):
+        self.assertTrue('_unittest' in str(database.make_session.engine))
 
 
 class TestInventoryLog(DatabaseSetup):
@@ -169,44 +164,31 @@ class TestInventoryLog(DatabaseSetup):
         self.assertTrue(fill_id not in [x.request_id for x in open_requests])
 
 
-class TestBackupLog(DatabaseSetup):
+class TestDerivedKeySetup(TestCase):
 
-    def test_create(self):
-        self.fail()
-        inst = database.BackupLog('foo', filename=self.filename)
-        with inst.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT COUNT(*) FROM project')
-            self.assertEqual(0, cur.fetchall()[0][0])
-        inst.create()
-        with inst.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT COUNT(*) FROM project')
-            self.assertEqual(1, cur.fetchall()[0][0])
-        self.assertRaises(RuntimeError, inst.create)
-        with inst.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT COUNT(*) FROM project')
-            self.assertEqual(1, cur.fetchall()[0][0])
-        with inst.connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT COUNT(*) FROM project WHERE name="foo"')
-            self.assertEqual(1, cur.fetchall()[0][0])
+    def test_creation(self):
+        setup = datatypes.DerivedKeySetup.create_default()
+        self.assertIsNone(setup.row_id)
+        with database.make_session() as session:
+            setup.create_db_entry(session)
+        self.assertIsInstance(setup.row_id, int)
+        with database.make_session() as session:
+            setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=setup.row_id)
+        self.assertIsNotNone(setup_from_db)
+        self.assertEqual(setup.row_id, setup_from_db.row_id)
 
+
+# ToDo: basic tests for other mapped classes
 
 class TestOther(DatabaseSetup):
 
-    def test_project_load_all(self):
-        self.fail()
-        self.assertEqual([], datatypes.Project.load_all())
-        project = datatypes.Project(base_path=os.path.abspath('.'), name='testproject',
-                                    vault=config.config['vault']['name'])
+    def test_get_overview(self):
+        projects = datatypes.get_overview()
+        self.assertFalse(len(projects))
+        pfoo = datatypes.Project(name='foo', base_path='/', vault='fooo')
+        pbar = datatypes.Project(name='bar', base_path='/', vault='fooo')
         with database.make_session() as session:
-            project.create_db_entry(session)
-        handler = inst = database.BackupLog('foo', filename=self.filename)
-        inst.create()
-        self.assertEqual([database.ProjectInfo('foo', '/', 0)], database.get_projects_for_file(self.filename))
-        inst = database.BackupLog('bar', filename=self.filename)
-        inst.create()
-        self.assertEqual([database.ProjectInfo('foo', '/', 0), database.ProjectInfo('bar', '/', 0)],
-                         database.get_projects_for_file(self.filename))
+            pfoo.create_db_entry(session)
+            pbar.create_db_entry(session)
+        projects = datatypes.get_overview()
+        self.assertEqual([('fooo', 'bar'), ('fooo', 'foo')], [(x.vault, x.name) for x in projects])
