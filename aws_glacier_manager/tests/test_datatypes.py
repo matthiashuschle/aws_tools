@@ -169,16 +169,72 @@ class TestDerivedKeySetup(TestCase):
     def test_creation(self):
         setup = datatypes.DerivedKeySetup.create_default()
         self.assertIsNone(setup.row_id)
+        setup.key_size_sig = None
+        setup.salt_key_sig = None
+        self.assertIsNone(setup.key_size_sig)
+        self.assertIsNone(setup.salt_key_sig)
         with database.make_session() as session:
             setup.create_db_entry(session)
+        # key is set
         self.assertIsInstance(setup.row_id, int)
+        # default values are assigned
+        self.assertEqual(setup.key_size_sig, 0)
+        self.assertEqual(setup.salt_key_sig, b'')
         with database.make_session() as session:
             setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=setup.row_id)
         self.assertIsNotNone(setup_from_db)
-        self.assertEqual(setup.row_id, setup_from_db.row_id)
+        self.assertIs(setup_from_db, setup)
 
 
-# ToDo: basic tests for other mapped classes
+class TestChunk(TestCase):
+
+    def test_creation(self):
+        # malformed parameters
+        with self.assertRaises(AttributeError):
+            datatypes.Chunk()
+        # creation and storage
+        chunk = datatypes.Chunk(start_offset=0, size=2**16, file_id=1)
+        with database.make_session() as session:
+            chunk.create_db_entry(session)
+        cid = chunk.row_id
+        with database.make_session() as session:
+            loaded_chunk = datatypes.Chunk.from_db(session, row_id=cid)
+        self.assertEqual(
+            [loaded_chunk.start_offset, loaded_chunk.size, loaded_chunk.file_id],
+            [0, 2**16, 1]
+        )
+        print(datatypes.MappedBase.object_index)
+        self.assertIs(loaded_chunk, chunk)
+        # delete object storage and try again
+        datatypes.Chunk.clear_object_index()
+        with database.make_session() as session:
+            loaded_chunk = datatypes.Chunk.from_db(session, row_id=cid)
+        self.assertEqual(
+            [loaded_chunk.start_offset, loaded_chunk.size, loaded_chunk.file_id],
+            [0, 2**16, 1]
+        )
+        self.assertIsNot(loaded_chunk, chunk)
+
+    def test_key_setup(self):
+        chunk = datatypes.Chunk(start_offset=0, size=2**16, file_id=1)
+        key_setup = datatypes.DerivedKeySetup.create_default()
+        with database.make_session() as session:
+            key_setup.create_db_entry(session)
+        chunk.set_key_setup(key_setup)
+        self.assertEqual(chunk.derived_key_setup_id, key_setup.row_id)
+        with database.make_session() as session:
+            chunk.update_db(session)
+        # clear chunk cache. chunks should be different instances, but the key setup not.
+        chunk.clear_object_index()
+        with database.make_session() as session:
+            loaded_chunk = datatypes.Chunk.from_db(session, row_id=chunk.row_id)
+        self.assertEqual(loaded_chunk.derived_key_setup_id, key_setup.row_id)
+        self.assertIsNotNone(loaded_chunk.derived_key_setup)
+        self.assertIs(loaded_chunk.derived_key_setup, chunk.derived_key_setup)
+        self.assertEqual(loaded_chunk.derived_key_setup.row_id, key_setup.row_id)
+
+
+# ToDo: basic tests for File and Project
 
 class TestOther(DatabaseSetup):
 

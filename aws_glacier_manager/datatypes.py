@@ -1,6 +1,6 @@
 import os
 import datetime
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import glob
 from contextlib import suppress
 from abc import ABC
@@ -21,6 +21,7 @@ class UnknownId(Exception):
 
 class MappedBase(ABC):
 
+    object_index = defaultdict(dict)  # stores objects by IDs to avoid multiple instances
     table_class = database.BackupLogBase  # ORM class
     required_cols = []
     optional_cols = []
@@ -95,8 +96,8 @@ class MappedBase(ABC):
         return row
 
     @classmethod
-    def _create_and_get_id(cls, session, row):
-        """ Push the ORM-Instance to the database and return the assigned ID.
+    def _create_and_get_in_db(cls, session, row):
+        """ Push the ORM-Instance to the database and return the assigned values incl. ID.
 
         :param Session session: database session
         :param row: ORM instance representing a table row
@@ -106,37 +107,74 @@ class MappedBase(ABC):
         session.add(row)
         session.flush()
         session.refresh(row)
-        return getattr(row, cls.table_class.id_column)
+        return row
 
     def create_db_entry(self, session):
         """ Verifies that the given ID is valid, or creates a new row, if it is empty. """
         if self.row_id:
             return
-        # write and set project ID
-        row = self.create_db_row()
-        self.row_id = self._create_and_get_id(session, row)
+        # write and set fields
+        row = self._create_and_get_in_db(session, self.create_db_row())
+        self._update_from_row(row)
         assert self.row_id is not None, 'id field is None!'
+        # store in the object index
+        # noinspection PyTypeChecker
+        self.object_index[self.__class__.__name__][self.row_id] = self
+
+    def _update_from_row(self, row):
+        for arg in self.columns_for_update():
+            if arg == self.table_class.id_column:
+                self.row_id = getattr(row, arg)
+            else:
+                setattr(self, arg, getattr(row, arg))
 
     def update_db(self, session):
+        # ToDo: test!!!
+        if self.row_id is None:
+            return self.create_db_entry(session)
         row = self._get_row_by_id(self.row_id, session)
         for col in self.columns_for_update():
             this_val = getattr(self, col)
             if this_val != getattr(row, col):
                 setattr(row, col, getattr(self, col))
+        session.flush()
+        session.refresh(row)
+        self._update_from_row(row)
 
     def remove_from_db(self, session):
         assert not self.is_deleted, 'double deletion of id %s' % repr(self.row_id)
         session.query(self.table_class).filter(self.id_col_property() == self.row_id).delete()
         self.is_deleted = True
 
+    def update_dependencies(self, session):
+        """ Called if an instance is created from a DataBase entry. Loads the linked objects. """
+        pass
+
+    @classmethod
+    def clear_object_index(cls):
+        cls.object_index[cls.__name__].clear()
+
     @classmethod
     def from_db(cls, session, row_id=None, row=None):
         """ Create instance from database row ID or row """
         assert row_id or row
+        if row:
+            # get the id from the row
+            row_id = getattr(row, cls.table_class.id_column)
+        if row_id:
+            # try to get the existing object
+            inst = cls.object_index[cls.__name__].get(row_id)
+            if inst is not None and not inst.is_deleted:
+                return inst
+        # create new object and store
         row = row or cls._get_row_by_id(row_id, session=session)
         colnames = cls.table_class.__table__.columns.keys()
         kwargs = {name: getattr(row, name) for name in colnames}
-        return cls(**kwargs)
+        inst = cls(**kwargs)
+        inst.update_dependencies(session)
+        # noinspection PyTypeChecker
+        cls.object_index[cls.__name__][inst.row_id] = inst
+        return inst
 
 
 class Project(MappedBase):
@@ -285,8 +323,12 @@ class Chunk(MappedBase):
     required_cols = ['start_offset', 'size', 'file_id']
 
     def __init__(self, **kwargs):
-        """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
-        of ORM-class. """
+        """ Defines a part of a file that becomes the uploaded object.
+
+        required keywords: ['start_offset', 'size', 'file_id']
+        optional keywords: ['chunk_id', 'upload_id', 'checksum', 'signature_type', 'signature',
+            'verify_key', 'derived_key_setup_id', 'encrypted']
+        """
         self.chunk_id = None
         self.upload_id = None
         self.checksum = None
@@ -301,12 +343,20 @@ class Chunk(MappedBase):
         super(Chunk, self).__init__(**kwargs)
         self.derived_key_setup = None
 
-    def load_derived_key_setup(self, session):
-        if not self.derived_key_setup_id:
-            raise RuntimeError('chunk does not have an ID for derived key setup!')
-        self.derived_key_setup = session.query(TabDerivedKeySetup)\
-            .filter(TabDerivedKeySetup.id_col_property() == self.derived_key_setup_id)\
-            .first()
+    def update_dependencies(self, session):
+        if self.derived_key_setup_id is None:
+            return
+        self.derived_key_setup = DerivedKeySetup.from_db(session, row_id=self.derived_key_setup_id)
+
+    def set_key_setup(self, derived_key_setup):
+        """ Set the encryption key setup to use.
+
+        :param DerivedKeySetup derived_key_setup: existing setup to use
+        :returns: None
+        """
+        assert derived_key_setup.row_id is not None, 'derived_key_setup is not saved yet!'
+        self.derived_key_setup_id = derived_key_setup.row_id
+        self.derived_key_setup = derived_key_setup
 
 
 class DerivedKeySetup(MappedBase):
