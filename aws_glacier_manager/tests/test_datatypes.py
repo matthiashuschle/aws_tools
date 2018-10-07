@@ -1,6 +1,7 @@
 import os
 from unittest import TestCase
 from io import BytesIO
+from tempfile import TemporaryDirectory
 from .. import config
 from .. import database
 from .. import datatypes
@@ -19,7 +20,8 @@ class DatabaseSetup(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        assert 'unittest' in str(datatypes.make_session.engine), 'wrong database: %s' % str(datatypes.make_session.engine)
+        assert 'unittest' in str(datatypes.make_session.engine), \
+            'wrong database: %s' % str(datatypes.make_session.engine)
         cls.wipe_test_db()
 
     def setUp(self):
@@ -214,13 +216,26 @@ class TestDerivedKeySetup(TestCase):
         self.assertEqual(setup_from_db.salt_key_sig, b'')
         self.assertEqual(setup_from_db.construct, 'foo')
 
+    def test_delete(self):
+        setup = datatypes.DerivedKeySetup.create_default()
+        with datatypes.make_session() as session:
+            setup.create_db_entry(session)
+            self.assertIsNotNone(setup.row_id)
+            old_id = setup.row_id
+            setup.remove_from_db(session)
+        self.assertTrue(setup.is_deleted)
+        self.assertIsNone(setup.row_id)
+        setup.key_size_sig = 5
+        with datatypes.make_session() as session:
+            with self.assertRaises(RuntimeError):
+                setup.update_db(session)
+            with self.assertRaises(datatypes.UnknownId):
+                datatypes.DerivedKeySetup.from_db(row_id=old_id, session=session)
+
 
 class TestChunk(TestCase):
 
     def test_creation(self):
-        # malformed parameters
-        with self.assertRaises(AttributeError):
-            datatypes.Chunk()
         # creation and storage
         chunk = datatypes.Chunk(start_offset=0, size=2**16, file_id=1)
         with datatypes.make_session() as session:
@@ -263,6 +278,30 @@ class TestChunk(TestCase):
 
 
 # ToDo: basic tests for File and Project
+class TestFile(DatabaseSetup):
+
+    @staticmethod
+    def create_project():
+        tmp_dir = TemporaryDirectory()
+        os.makedirs(os.path.join(tmp_dir.name, 'subdir'))
+        project = datatypes.Project(base_path=tmp_dir.name, name='foo')
+        return tmp_dir, project
+
+    def test_init(self):
+        tmp_dir, project = self.create_project()
+        path_a = os.path.join(tmp_dir.name, 'tmpfile_a')
+        path_b = os.path.join(tmp_dir.name, 'subdir', 'tmpfile_b')
+        with open(path_a, 'wb') as f_out:
+            f_out.write(bytearray([5, 5, 5, 5, 5]))
+        with open(path_b, 'wb') as f_out:
+            f_out.write(bytearray([6, 6, 6, 6, 6, 6]))
+        testfile_a = datatypes.File(path='', name='tmpfile_a', project_id=project.row_id)
+        testfile_b = datatypes.File(path='subdir', name='tmpfile_b', project_id=project.row_id)
+
+
+class TestProject(DatabaseSetup):
+    pass
+
 
 class TestOther(DatabaseSetup):
 

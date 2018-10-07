@@ -2,8 +2,7 @@ import os
 import datetime
 from collections import OrderedDict, defaultdict
 import glob
-from contextlib import suppress
-from abc import ABC
+from abc import ABC, abstractmethod
 from itertools import chain
 from . import database
 from .database import (make_session, TabProject, TabFile, TabDerivedKeySetup, TabChunk, 
@@ -27,19 +26,17 @@ class MappedBase(ABC):
     required_cols = []
     optional_cols = []
 
-    def __init__(self, *args, **kwargs):
-        for arg in self.required_cols:
-            if arg not in kwargs:
-                raise AttributeError('missing required argument: %s' % arg)
-            setattr(self, arg, kwargs[arg])
-            del kwargs[arg]
-        for arg in self.optional_cols:
-            setattr(self, arg, kwargs.get(arg, None))
-            with suppress(KeyError):
-                del kwargs[arg]
-        if len(kwargs):
-            raise AttributeError('unexpected attributes: %s' % [x for x in kwargs])
+    @abstractmethod
+    def __init__(self):
+        """ The inheriting contructors MUST be able to handle all required and optional database
+        fields as keyword arguments! """
         self.is_deleted = False
+
+    @classmethod
+    def from_row(cls, row):
+        colnames = cls.table_class.__table__.columns.keys()
+        kwargs = {name: getattr(row, name) for name in colnames}
+        return cls(**kwargs)
 
     def update_from(self, **kwargs):
         for arg, val in kwargs.items():
@@ -111,13 +108,16 @@ class MappedBase(ABC):
         return row
 
     def create_db_entry(self, session):
-        """ Verifies that the given ID is valid, or creates a new row, if it is empty. """
+        """ Creates a new row, if ID is empty. """
+        if self.is_deleted:
+            raise RuntimeError('trying to operate on deleted row.')
         if self.row_id:
             return
         # write and set fields
         row = self._create_and_get_in_db(session, self.create_db_row())
         self._update_from_row(row)
         assert self.row_id is not None, 'id field is None!'
+        self.update_dependencies(session)
         # store in the object index
         # noinspection PyTypeChecker
         self.object_index[self.__class__.__name__][self.row_id] = self
@@ -138,6 +138,8 @@ class MappedBase(ABC):
         :param session: database session
         :return: None
         """
+        if self.is_deleted:
+            raise RuntimeError('trying to operate on deleted row.')
         if self.row_id is None:
             return self.create_db_entry(session)
         row = self._get_row_by_id(self.row_id, session)
@@ -148,10 +150,12 @@ class MappedBase(ABC):
         session.flush()
         session.refresh(row)
         self._update_from_row(row)
+        self.update_dependencies(session)
 
     def remove_from_db(self, session):
         assert not self.is_deleted, 'double deletion of id %s' % repr(self.row_id)
         session.query(self.table_class).filter(self.id_col_property() == self.row_id).delete()
+        self.row_id = None
         self.is_deleted = True
 
     def update_dependencies(self, session):
@@ -176,9 +180,7 @@ class MappedBase(ABC):
                 return inst
         # create new object and store
         row = row or cls._get_row_by_id(row_id, session=session)
-        colnames = cls.table_class.__table__.columns.keys()
-        kwargs = {name: getattr(row, name) for name in colnames}
-        inst = cls(**kwargs)
+        inst = cls.from_row(row)
         inst.update_dependencies(session)
         # noinspection PyTypeChecker
         cls.object_index[cls.__name__][inst.row_id] = inst
@@ -191,14 +193,14 @@ class Project(MappedBase):
     optional_cols = ['vault', table_class.id_column]
     required_cols = ['base_path', 'name']
 
-    def __init__(self, **kwargs):
-        self.name = None
-        self.base_path = None
-        self.vault = None
-        self.project_id = None
-        if kwargs.get('base_path'):
-            kwargs['base_path'] = os.path.abspath(kwargs['base_path'])
-        super(Project, self).__init__(**kwargs)
+    def __init__(self, name, base_path, vault=None, project_id=None):
+        super(Project, self).__init__()
+        # == begin DB mapping
+        self.name = name
+        self.base_path = os.path.abspath(base_path)
+        self.vault = vault
+        self.project_id = project_id
+        # == end DB mapping
         self.files = {}  # relative path as key -> easier folder comparison
 
     def load_files(self, session):
@@ -282,17 +284,21 @@ class File(MappedBase):
     optional_cols = ['is_folder', 'size', 'outdated', table_class.id_column]
     required_cols = ['path', 'name', 'project_id']
 
-    def __init__(self, **kwargs):
+    def __init__(self, path, name, project_id,
+                 is_folder=None, size=None, outdated=None, file_id=None):
         """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
         of ORM-class. """
-        self.file_id = None
-        self.name = None
-        self.path = None
-        self.project_id = None
-        self.is_folder = None
-        self.size = None
-        self.outdated = None
-        super(File, self).__init__(**kwargs)
+        super(File, self).__init__()
+        # == begin DB mapping
+        self.file_id = file_id
+        self.name = name
+        self.path = path
+        self.project_id = project_id
+        self.is_folder = is_folder
+        self.size = size
+        self.outdated = outdated
+        # == end DB mapping
+        # relationships are reserved names in the underlying mapping class, but not synced to this class
         self.chunks = None
 
     def set_size(self, base_path):
@@ -330,25 +336,31 @@ class Chunk(MappedBase):
                      'verify_key', 'derived_key_setup_id', 'encrypted']
     required_cols = ['start_offset', 'size', 'file_id']
 
-    def __init__(self, **kwargs):
+    def __init__(self, start_offset, size, file_id,
+                 upload_id=None, checksum=None, signature_type=None, signature=None,
+                 verify_key=None, derived_key_setup_id=None, encrypted=None,
+                 chunk_id=None):
         """ Defines a part of a file that becomes the uploaded object.
 
         required keywords: ['start_offset', 'size', 'file_id']
         optional keywords: ['chunk_id', 'upload_id', 'checksum', 'signature_type', 'signature',
             'verify_key', 'derived_key_setup_id', 'encrypted']
         """
-        self.chunk_id = None
-        self.upload_id = None
-        self.checksum = None
-        self.signature_type = None
-        self.signature = None
-        self.verify_key = None
-        self.derived_key_setup_id = None
-        self.start_offset = None
-        self.size = None
-        self.encrypted = None
-        self.file_id = None
-        super(Chunk, self).__init__(**kwargs)
+        super(Chunk, self).__init__()
+        # == begin DB mapping
+        self.chunk_id = chunk_id
+        self.start_offset = start_offset
+        self.size = size
+        self.file_id = file_id
+        self.upload_id = upload_id
+        self.checksum = checksum
+        self.signature_type = signature_type
+        self.signature = signature
+        self.verify_key = verify_key
+        self.derived_key_setup_id = derived_key_setup_id
+        self.encrypted = encrypted
+        # == end DB mapping
+        # relationships are reserved names in the underlying mapping class, but not synced to this class
         self.derived_key_setup = None
 
     def update_dependencies(self, session):
@@ -373,16 +385,19 @@ class DerivedKeySetup(MappedBase):
     optional_cols = [table_class.id_column, 'key_size_sig', 'salt_key_sig']
     required_cols = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
 
-    def __init__(self, **kwargs):
-        self.derived_key_setup_id = None
-        self.construct = None
-        self.ops = None
-        self.mem = None
-        self.key_size_enc = None
-        self.key_size_sig = None
-        self.salt_key_enc = None
-        self.salt_key_sig = None
-        super(DerivedKeySetup, self).__init__(**kwargs)
+    def __init__(self, construct, ops, mem, key_size_enc, salt_key_enc,
+                 key_size_sig=None, salt_key_sig=None, derived_key_setup_id=None):
+        super(DerivedKeySetup, self).__init__()
+        # == begin DB mapping
+        self.derived_key_setup_id = derived_key_setup_id
+        self.construct = construct
+        self.ops = ops
+        self.mem = mem
+        self.key_size_enc = key_size_enc
+        self.key_size_sig = key_size_sig
+        self.salt_key_enc = salt_key_enc
+        self.salt_key_sig = salt_key_sig
+        # == end DB mapping
 
     @classmethod
     def create_default(cls, enable_auth_key=False):
@@ -409,12 +424,14 @@ class InventoryRequest(MappedBase):
     required_cols = ['vault_name', 'sent_dt', 'job_id']
     optional_cols = [table_class.id_column]
 
-    def __init__(self, **kwargs):
-        self.request_id = None
-        self.vault_name = None
-        self.sent_dt = None
-        self.job_id = None
-        super(InventoryRequest, self).__init__(**kwargs)
+    def __init__(self, vault_name, sent_dt, job_id, request_id=None):
+        super(InventoryRequest, self).__init__()
+        # == begin DB mapping
+        self.request_id = request_id
+        self.vault_name = vault_name
+        self.sent_dt = sent_dt
+        self.job_id = job_id
+        # == end DB mapping
 
 
 class InventoryResponse(MappedBase):
@@ -423,14 +440,17 @@ class InventoryResponse(MappedBase):
     required_cols = ['retrieved_dt', 'request_id']
     optional_cols = [table_class.id_column, 'content_type', 'status', 'body']
 
-    def __init__(self, **kwargs):
-        self.response_id = None
-        self.request_id = None
-        self.retrieved_dt = None
-        self.content_type = None
-        self.status = None
-        self.body = None
-        super(InventoryResponse, self).__init__(**kwargs)
+    def __init__(self, request_id, retrieved_dt, content_type=None, status=None,
+                 body=None, response_id=None):
+        super(InventoryResponse, self).__init__()
+        # == begin DB mapping
+        self.response_id = response_id
+        self.request_id = request_id
+        self.retrieved_dt = retrieved_dt
+        self.content_type = content_type
+        self.status = status
+        self.body = body
+        # == end DB mapping
 
 
 class InventoryHandler:
