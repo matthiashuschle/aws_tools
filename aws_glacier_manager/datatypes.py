@@ -19,6 +19,10 @@ class UnknownId(Exception):
     pass
 
 
+class ChunkBoundaryError(Exception):
+    pass
+
+
 class MappedBase(ABC):
 
     object_index = defaultdict(dict)  # stores objects by IDs to avoid multiple instances
@@ -294,7 +298,7 @@ class File(MappedBase):
         self.name = name
         self.path = path
         self.project_id = project_id
-        self.is_folder = is_folder
+        self.is_folder = is_folder  # this should be set on creation!
         self.size = size
         self.outdated = outdated
         # == end DB mapping
@@ -304,7 +308,7 @@ class File(MappedBase):
     def set_size(self, base_path):
         if self.is_folder:
             return
-        self.size = get_file_size(os.path.join(base_path, self.path))
+        self.size = get_file_size(os.path.join(base_path, self.path, self.name))
 
     def load_chunks(self, session):
         if not self.file_id:
@@ -313,18 +317,28 @@ class File(MappedBase):
             .filter(TabChunk.file_id == self.file_id)\
             .all()
         loaded_chunks = [Chunk.from_db(session, row=row) for row in chunk_rows]
-        if sum(x.size for x in loaded_chunks) != self.size:
-            raise ValueError('Chunk size invalid!')
+        if not len(loaded_chunks):
+            self.chunks = []
+            return
+        offsets = {x.start_offset for x in loaded_chunks}
+        ends = {x.start_offset + x.size for x in loaded_chunks}
+        remaining = (offsets - ends) | (ends - offsets)
+        if 0 not in remaining:
+            raise ChunkBoundaryError('no Chunk with offset 0!')
+        if self.size not in remaining:
+            raise ChunkBoundaryError('Chunks don\'t add up to file size!')
+        if len(remaining) > 2:
+            raise ChunkBoundaryError('Chunks boundaries are not aligned!')
         self.chunks = to_ordered_dict({x.row_id: x for x in loaded_chunks})
         
-    def drop_chunks(self):
-        with make_session() as session:
-            for chunk in self.chunks:
+    def drop_chunks(self, session=None):
+        with make_session(session) as session:
+            for chunk in self.chunks.values():
                 chunk.remove_from_db(session)
         self.chunks = OrderedDict([x for x in self.chunks.items() if not x[1].is_deleted])
         
     def drop_chunk(self, chunk, session):
-        assert chunk.row_id in {x.row_id for x in self.chunks}
+        assert chunk.row_id in {x for x in self.chunks}
         chunk.remove_from_db(session)
         del self.chunks[chunk.row_id]
 

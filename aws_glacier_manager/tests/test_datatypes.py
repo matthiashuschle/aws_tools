@@ -277,7 +277,6 @@ class TestChunk(TestCase):
         self.assertEqual(loaded_chunk.derived_key_setup.row_id, key_setup.row_id)
 
 
-# ToDo: basic tests for File and Project
 class TestFile(DatabaseSetup):
 
     @staticmethod
@@ -285,6 +284,8 @@ class TestFile(DatabaseSetup):
         tmp_dir = TemporaryDirectory()
         os.makedirs(os.path.join(tmp_dir.name, 'subdir'))
         project = datatypes.Project(base_path=tmp_dir.name, name='foo')
+        with datatypes.make_session() as session:
+            project.create_db_entry(session)
         return tmp_dir, project
 
     def test_init(self):
@@ -295,10 +296,106 @@ class TestFile(DatabaseSetup):
             f_out.write(bytearray([5, 5, 5, 5, 5]))
         with open(path_b, 'wb') as f_out:
             f_out.write(bytearray([6, 6, 6, 6, 6, 6]))
-        testfile_a = datatypes.File(path='', name='tmpfile_a', project_id=project.row_id)
-        testfile_b = datatypes.File(path='subdir', name='tmpfile_b', project_id=project.row_id)
+        testfiles = [
+            datatypes.File(path='', name='tmpfile_a', project_id=project.row_id),
+            datatypes.File(path='subdir', name='tmpfile_b', project_id=project.row_id),
+            datatypes.File(path='', name='subdir', project_id=project.row_id, is_folder=True)
+        ]
+        with datatypes.make_session() as session:
+            for f in testfiles:
+                f.create_db_entry(session)
+        self.assertEqual([False, False, True], [x.is_folder for x in testfiles])
+        self.assertEqual([None, None, None], [x.size for x in testfiles])
+        self.assertEqual([False, False, False], [x.outdated for x in testfiles])
+        for f in testfiles:
+            f.set_size(project.base_path)
+        self.assertEqual([False, False, True], [x.is_folder for x in testfiles])
+        self.assertEqual([5, 6, None], [x.size for x in testfiles])
+
+    def test_chunks(self):
+        tmp_dir, project = self.create_project()
+        path_a = os.path.join(tmp_dir.name, 'tmpfile_a')
+        with open(path_a, 'wb') as f_out:
+            f_out.write(bytearray([5, 5, 5, 5, 5]))
+        testfile = datatypes.File(path='', name='tmpfile_a', project_id=project.row_id)
+        testfile.set_size(project.base_path)
+        with datatypes.make_session() as session:
+            testfile.create_db_entry(session)
+            testfile.load_chunks(session)
+        self.assertEqual(len(testfile.chunks), 0)
+        chunks = [
+            datatypes.Chunk(0, 2, testfile.row_id),
+            datatypes.Chunk(2, 3, testfile.row_id),
+        ]
+        with datatypes.make_session() as session:
+            for x in chunks:
+                x.create_db_entry(session)
+        with datatypes.make_session() as session:
+            testfile.load_chunks(session)
+        self.assertEqual(len(testfile.chunks), 2)
+        self.assertEqual([1, 2], [x for x in testfile.chunks])
+        self.assertIs(testfile.chunks[1], chunks[0])
+        self.assertIs(testfile.chunks[2], chunks[1])
+        # add a trailing chunk
+        chunk_trailing = datatypes.Chunk(5, 1, testfile.row_id)
+        with datatypes.make_session() as session:
+            chunk_trailing.create_db_entry(session)
+            with self.assertRaises(datatypes.ChunkBoundaryError):
+                testfile.load_chunks(session)
+            chunk_trailing.remove_from_db(session)
+            chunks[0].remove_from_db(session)
+            chunks[1].remove_from_db(session)
+        # overlapping chunks
+        chunks = [
+            datatypes.Chunk(0, 2, testfile.row_id),
+            datatypes.Chunk(1, 4, testfile.row_id),
+        ]
+        with datatypes.make_session() as session:
+            for x in chunks:
+                x.create_db_entry(session)
+            with self.assertRaises(datatypes.ChunkBoundaryError):
+                testfile.load_chunks(session)
+            chunks[0].remove_from_db(session)
+            chunks[1].remove_from_db(session)
+        # disjoined chunks
+        chunks = [
+            datatypes.Chunk(0, 1, testfile.row_id),
+            datatypes.Chunk(2, 3, testfile.row_id),
+        ]
+        with datatypes.make_session() as session:
+            for x in chunks:
+                x.create_db_entry(session)
+            with self.assertRaises(datatypes.ChunkBoundaryError):
+                testfile.load_chunks(session)
+            chunks[0].remove_from_db(session)
+            chunks[1].remove_from_db(session)
+
+    def test_chunk_dropping(self):
+        tmp_dir, project = self.create_project()
+        path_a = os.path.join(tmp_dir.name, 'tmpfile_a')
+        with open(path_a, 'wb') as f_out:
+            f_out.write(bytearray([5, 5, 5, 5, 5]))
+        testfile = datatypes.File(path='', name='tmpfile_a', project_id=project.row_id)
+        testfile.set_size(project.base_path)
+        with datatypes.make_session() as session:
+            testfile.create_db_entry(session)
+        chunks = [
+            datatypes.Chunk(0, 2, testfile.row_id),
+            datatypes.Chunk(2, 3, testfile.row_id),
+        ]
+        with datatypes.make_session() as session:
+            for x in chunks:
+                x.create_db_entry(session)
+        with datatypes.make_session() as session:
+            testfile.load_chunks(session)
+        testfile.drop_chunks()
+        self.assertEqual(len(testfile.chunks), 0)
+        with datatypes.make_session() as session:
+            testfile.load_chunks(session)
+        self.assertEqual(len(testfile.chunks), 0)
 
 
+# ToDo: basic tests for Project
 class TestProject(DatabaseSetup):
     pass
 
