@@ -132,6 +132,10 @@ class SessionContext:
         self.engine = create_engine(connector_str)
         self.session_fac = sessionmaker(bind=self.engine)
 
+    def set_engine(self, connector_str):
+        self.engine = create_engine(connector_str)
+        self.session_fac = sessionmaker(bind=self.engine)
+
     @contextmanager
     def __call__(self, session=None):
         if session is not None:
@@ -157,7 +161,6 @@ def create_tables():
 
 
 def set_test():
-    global make_session
     config.load_test()
-    make_session = SessionContext()
+    make_session.set_engine(config.config['database']['connector'])
     create_tables()

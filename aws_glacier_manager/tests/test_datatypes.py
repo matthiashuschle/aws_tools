@@ -19,7 +19,7 @@ class DatabaseSetup(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        assert 'unittest' in str(database.make_session.engine), 'wrong database: %s' % str(database.make_session.engine)
+        assert 'unittest' in str(datatypes.make_session.engine), 'wrong database: %s' % str(datatypes.make_session.engine)
         cls.wipe_test_db()
 
     def setUp(self):
@@ -27,7 +27,7 @@ class DatabaseSetup(TestCase):
         database.create_tables()
 
     def test_make_session(self):
-        self.assertTrue('_unittest' in str(database.make_session.engine))
+        self.assertTrue('_unittest' in str(datatypes.make_session.engine))
 
 
 class TestInventoryLog(DatabaseSetup):
@@ -49,7 +49,7 @@ class TestInventoryLog(DatabaseSetup):
         self.assertIsNotNone(request.sent_dt)
         self.assertEqual(request.vault_name, config.config['vault']['name'])
         del handler
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             request = datatypes.InventoryRequest.from_db(session, row_id=1)
         self.assertEqual(request.request_id, 1)
         self.assertEqual(request.job_id, 'abc')
@@ -62,13 +62,13 @@ class TestInventoryLog(DatabaseSetup):
         self.assertEqual(request.request_id, 2)
         del request
         del handler
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             request = datatypes.InventoryRequest.from_db(session, row_id=1)
         self.assertEqual(request.request_id, 1)
         self.assertEqual(request.job_id, 'abc')
         self.assertIsNotNone(request.sent_dt)
         self.assertEqual(request.vault_name, config.config['vault']['name'])
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             request = datatypes.InventoryRequest.from_db(session, row_id=2)
         self.assertEqual(request.request_id, 2)
         self.assertEqual(request.job_id, 'abcd')
@@ -173,17 +173,46 @@ class TestDerivedKeySetup(TestCase):
         setup.salt_key_sig = None
         self.assertIsNone(setup.key_size_sig)
         self.assertIsNone(setup.salt_key_sig)
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             setup.create_db_entry(session)
         # key is set
         self.assertIsInstance(setup.row_id, int)
         # default values are assigned
         self.assertEqual(setup.key_size_sig, 0)
         self.assertEqual(setup.salt_key_sig, b'')
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=setup.row_id)
         self.assertIsNotNone(setup_from_db)
         self.assertIs(setup_from_db, setup)
+        
+    def test_update(self):
+        setup = datatypes.DerivedKeySetup.create_default()
+        self.assertIsNone(setup.row_id)
+        setup.key_size_sig = None
+        setup.salt_key_sig = None
+        with datatypes.make_session() as session:
+            setup.create_db_entry(session)
+        self.assertIsInstance(setup.row_id, int)
+        # default values are assigned
+        self.assertEqual(setup.key_size_sig, 0)
+        self.assertEqual(setup.salt_key_sig, b'')
+        # modify, update, and check
+        setup.key_size_sig = 42
+        setup.construct = 'foo'
+        old_id = setup.row_id
+        with datatypes.make_session() as session:
+            setup.update_db(session)
+        self.assertEqual(setup.row_id, old_id)
+        self.assertEqual(setup.key_size_sig, 42)
+        self.assertEqual(setup.salt_key_sig, b'')
+        self.assertEqual(setup.construct, 'foo')
+        # delete from cache and retrieve again
+        setup.clear_object_index()
+        with datatypes.make_session() as session:
+            setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=old_id)
+        self.assertEqual(setup_from_db.key_size_sig, 42)
+        self.assertEqual(setup_from_db.salt_key_sig, b'')
+        self.assertEqual(setup_from_db.construct, 'foo')
 
 
 class TestChunk(TestCase):
@@ -194,20 +223,19 @@ class TestChunk(TestCase):
             datatypes.Chunk()
         # creation and storage
         chunk = datatypes.Chunk(start_offset=0, size=2**16, file_id=1)
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             chunk.create_db_entry(session)
         cid = chunk.row_id
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             loaded_chunk = datatypes.Chunk.from_db(session, row_id=cid)
         self.assertEqual(
             [loaded_chunk.start_offset, loaded_chunk.size, loaded_chunk.file_id],
             [0, 2**16, 1]
         )
-        print(datatypes.MappedBase.object_index)
         self.assertIs(loaded_chunk, chunk)
         # delete object storage and try again
         datatypes.Chunk.clear_object_index()
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             loaded_chunk = datatypes.Chunk.from_db(session, row_id=cid)
         self.assertEqual(
             [loaded_chunk.start_offset, loaded_chunk.size, loaded_chunk.file_id],
@@ -218,15 +246,15 @@ class TestChunk(TestCase):
     def test_key_setup(self):
         chunk = datatypes.Chunk(start_offset=0, size=2**16, file_id=1)
         key_setup = datatypes.DerivedKeySetup.create_default()
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             key_setup.create_db_entry(session)
         chunk.set_key_setup(key_setup)
         self.assertEqual(chunk.derived_key_setup_id, key_setup.row_id)
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             chunk.update_db(session)
         # clear chunk cache. chunks should be different instances, but the key setup not.
         chunk.clear_object_index()
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             loaded_chunk = datatypes.Chunk.from_db(session, row_id=chunk.row_id)
         self.assertEqual(loaded_chunk.derived_key_setup_id, key_setup.row_id)
         self.assertIsNotNone(loaded_chunk.derived_key_setup)
@@ -243,7 +271,7 @@ class TestOther(DatabaseSetup):
         self.assertFalse(len(projects))
         pfoo = datatypes.Project(name='foo', base_path='/', vault='fooo')
         pbar = datatypes.Project(name='bar', base_path='/', vault='fooo')
-        with database.make_session() as session:
+        with datatypes.make_session() as session:
             pfoo.create_db_entry(session)
             pbar.create_db_entry(session)
         projects = datatypes.get_overview()

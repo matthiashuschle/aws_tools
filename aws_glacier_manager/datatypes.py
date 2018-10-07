@@ -6,7 +6,8 @@ from contextlib import suppress
 from abc import ABC
 from itertools import chain
 from . import database
-from .database import TabProject, TabFile, TabDerivedKeySetup, TabChunk, TabInventoryRequest, TabInventoryResponse
+from .database import (make_session, TabProject, TabFile, TabDerivedKeySetup, TabChunk, 
+                       TabInventoryRequest, TabInventoryResponse)
 from sqlalchemy.sql.expression import null, func
 from nacl import pwhash, utils, secret
 
@@ -129,7 +130,14 @@ class MappedBase(ABC):
                 setattr(self, arg, getattr(row, arg))
 
     def update_db(self, session):
-        # ToDo: test!!!
+        """ Update the database with the current values.
+
+        - fetches default values afterwards
+        - tested in TestDerivedKeySetup.test_update
+
+        :param session: database session
+        :return: None
+        """
         if self.row_id is None:
             return self.create_db_entry(session)
         row = self._get_row_by_id(self.row_id, session)
@@ -241,7 +249,7 @@ class Project(MappedBase):
 
     def add_files(self, paths, update=True):
         files = []
-        with database.make_session() as session:
+        with make_session() as session:
             for path in paths:
                 file = self.add_file(path)
                 if file is not None:
@@ -253,11 +261,11 @@ class Project(MappedBase):
 
     @classmethod
     def load_all(cls):
-        with database.make_session() as session:
+        with make_session() as session:
             return [cls.from_db(session, row=row) for row in session.query(cls.table_class).all()]
 
     def drop_files(self):
-        with database.make_session() as session:
+        with make_session() as session:
             for file in self.files:
                 file.remove_from_db(session)
         self.files = {x: y for x, y in self.files.items() if not y.is_deleted}
@@ -304,7 +312,7 @@ class File(MappedBase):
         self.chunks = to_ordered_dict({x.row_id: x for x in loaded_chunks})
         
     def drop_chunks(self):
-        with database.make_session() as session:
+        with make_session() as session:
             for chunk in self.chunks:
                 chunk.remove_from_db(session)
         self.chunks = OrderedDict([x for x in self.chunks.items() if not x[1].is_deleted])
@@ -438,7 +446,7 @@ class InventoryHandler:
             sent_dt=sent_dt,
             job_id=job_id
         )
-        with database.make_session() as session:
+        with make_session() as session:
             request.create_db_entry(session)
         return request
 
@@ -451,7 +459,7 @@ class InventoryHandler:
             'body': response_dict['body'].read(),
             'request_id': request_id
         }
-        with database.make_session() as session:
+        with make_session() as session:
             response_row = session.query(TabInventoryResponse)\
                 .filter(TabInventoryResponse.request_id == request_id)\
                 .first()
@@ -465,7 +473,7 @@ class InventoryHandler:
         return response
 
     def get_open_requests(self):
-        with database.make_session() as session:
+        with make_session() as session:
             requests = session.query(TabInventoryRequest)\
                 .outerjoin(TabInventoryRequest.response)\
                 .filter(
@@ -474,7 +482,7 @@ class InventoryHandler:
             return [InventoryRequest.from_db(session, row=row) for row in requests or []]
 
     def get_latest_response(self):
-        with database.make_session() as session:
+        with make_session() as session:
             latest_response = session.query(func.max(TabInventoryRequest.sent_dt))\
                 .join(TabInventoryRequest.response)\
                 .filter(
