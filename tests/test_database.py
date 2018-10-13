@@ -2,7 +2,7 @@ import os
 from unittest import TestCase
 import sqlite3
 from io import BytesIO
-from .. import database
+from aws_glacier_manager import database
 
 
 class TestConstraint(TestCase):

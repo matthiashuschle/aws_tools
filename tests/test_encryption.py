@@ -1,6 +1,6 @@
 from unittest import TestCase
 from hashlib import md5
-from .. import encryption, datatypes
+from aws_glacier_manager import encryption, datatypes
 from io import BytesIO
 from nacl import pwhash
 import os
