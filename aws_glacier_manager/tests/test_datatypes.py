@@ -1,6 +1,7 @@
 import os
 from unittest import TestCase
 from io import BytesIO
+from collections import defaultdict
 from tempfile import TemporaryDirectory
 from .. import config
 from .. import database
@@ -27,6 +28,7 @@ class DatabaseSetup(TestCase):
     def setUp(self):
         self.wipe_test_db()
         database.create_tables()
+        datatypes.MappedBase.object_index = defaultdict(dict)
 
     def test_make_session(self):
         self.assertTrue('_unittest' in str(datatypes.make_session.engine))
@@ -99,11 +101,12 @@ class TestInventoryLog(DatabaseSetup):
             'body': BytesIO(b'1234'),
             'contentType': 'application/json',
             'status': 200}
-        response = handler.store_response(request.request_id, response_dict)
+        response = handler.store_response(request, response_dict)
         self.assertEqual(response.request_id, request.request_id)
         self.assertEqual(response.content_type, 'application/json')
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b'1234')
+        self.assertIs(response.request, request)
         stored_response = handler.get_latest_response()
         self.assertEqual(response.response_id, stored_response.response_id)
         self.assertEqual(response.request_id, stored_response.request_id)
@@ -111,6 +114,7 @@ class TestInventoryLog(DatabaseSetup):
         self.assertEqual(response.content_type, stored_response.content_type)
         self.assertEqual(response.status, stored_response.status)
         self.assertEqual(response.body, stored_response.body)
+        self.assertIs(stored_response.request, request)
         response_dict = {
             'ResponseMetadata': {
                 'HTTPHeaders': {
@@ -128,11 +132,12 @@ class TestInventoryLog(DatabaseSetup):
             'body': BytesIO(b'12345'),
             'contentType': 'application/json',
             'status': 200}
-        response = handler.store_response(request.request_id, response_dict)
+        response = handler.store_response(request, response_dict)
         self.assertEqual(response.request_id, request.request_id)
         self.assertEqual(response.content_type, 'application/json')
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, b'12345')
+        self.assertIs(response.request, request)
 
     def test_get_open_requests(self):
         handler = datatypes.InventoryHandler(config.config['vault']['name'])
@@ -160,7 +165,7 @@ class TestInventoryLog(DatabaseSetup):
             'status': 200}
         open_requests = handler.get_open_requests()
         fill_id = open_requests[1].request_id
-        handler.store_response(fill_id, response)
+        handler.store_response(open_requests[1], response)
         open_requests = handler.get_open_requests()
         self.assertEqual(1, len(open_requests))
         self.assertTrue(fill_id not in [x.request_id for x in open_requests])
@@ -321,7 +326,7 @@ class TestFile(DatabaseSetup):
         testfile.set_size(project.base_path)
         with datatypes.make_session() as session:
             testfile.create_db_entry(session)
-            testfile.load_chunks(session)
+            # testfile.load_chunks(session)
         self.assertEqual(len(testfile.chunks), 0)
         chunks = [
             datatypes.Chunk(0, 2, testfile.row_id),
@@ -330,8 +335,8 @@ class TestFile(DatabaseSetup):
         with datatypes.make_session() as session:
             for x in chunks:
                 x.create_db_entry(session)
-        with datatypes.make_session() as session:
-            testfile.load_chunks(session)
+        # with datatypes.make_session() as session:
+        #     testfile.load_chunks(session)
         self.assertEqual(len(testfile.chunks), 2)
         self.assertEqual([1, 2], [x for x in testfile.chunks])
         self.assertIs(testfile.chunks[1], chunks[0])
@@ -341,7 +346,7 @@ class TestFile(DatabaseSetup):
         with datatypes.make_session() as session:
             chunk_trailing.create_db_entry(session)
             with self.assertRaises(datatypes.ChunkBoundaryError):
-                testfile.load_chunks(session)
+                testfile.verify_chunk_ranges()
             chunk_trailing.remove_from_db(session)
             chunks[0].remove_from_db(session)
             chunks[1].remove_from_db(session)
@@ -354,7 +359,7 @@ class TestFile(DatabaseSetup):
             for x in chunks:
                 x.create_db_entry(session)
             with self.assertRaises(datatypes.ChunkBoundaryError):
-                testfile.load_chunks(session)
+                testfile.verify_chunk_ranges()
             chunks[0].remove_from_db(session)
             chunks[1].remove_from_db(session)
         # disjoined chunks
@@ -366,9 +371,7 @@ class TestFile(DatabaseSetup):
             for x in chunks:
                 x.create_db_entry(session)
             with self.assertRaises(datatypes.ChunkBoundaryError):
-                testfile.load_chunks(session)
-            chunks[0].remove_from_db(session)
-            chunks[1].remove_from_db(session)
+                testfile.verify_chunk_ranges()
 
     def test_chunk_dropping(self):
         tmp_dir, project = self.create_project()
@@ -397,7 +400,29 @@ class TestFile(DatabaseSetup):
 
 # ToDo: basic tests for Project
 class TestProject(DatabaseSetup):
-    pass
+
+    def test_init(self):
+        tmp_dir = TemporaryDirectory()
+        project = datatypes.Project(base_path=tmp_dir.name, name='foo')
+        with datatypes.make_session() as session:
+            project.create_db_entry(session)
+        project = datatypes.Project(base_path=tmp_dir.name, name='bar', vault='abc')
+        with datatypes.make_session() as session:
+            project.create_db_entry(session)
+        del project
+        datatypes.Project.clear_object_index()
+        with datatypes.make_session() as session:
+            p1 = datatypes.Project.from_db(session, 1)
+            self.assertEqual('foo', p1.name)
+            self.assertEqual(tmp_dir.name, p1.base_path)
+            self.assertIsNone(p1.vault)
+            p2 = datatypes.Project.from_db(session, 2)
+            self.assertEqual('bar', p2.name)
+            self.assertEqual(tmp_dir.name, p2.base_path)
+            self.assertEqual('abc', p2.vault)
+        project = datatypes.Project(base_path=os.path.join(tmp_dir.name, '..'), name='foo')
+        self.assertEqual(os.path.dirname(os.path.abspath(tmp_dir.name)), project.base_path)
+
 
 
 class TestOther(DatabaseSetup):

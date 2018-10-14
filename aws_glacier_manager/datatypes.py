@@ -3,6 +3,7 @@ import datetime
 from collections import OrderedDict, defaultdict
 import glob
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from itertools import chain
 from . import database
 from .database import (make_session, TabProject, TabFile, TabDerivedKeySetup, TabChunk, 
@@ -121,10 +122,10 @@ class MappedBase(ABC):
         row = self._create_and_get_in_db(session, self.create_db_row())
         self._update_from_row(row)
         assert self.row_id is not None, 'id field is None!'
-        self.update_dependencies(session)
         # store in the object index
         # noinspection PyTypeChecker
         self.object_index[self.__class__.__name__][self.row_id] = self
+        self.update_dependencies(session)
 
     def _update_from_row(self, row):
         for arg in self.columns_for_update():
@@ -159,8 +160,10 @@ class MappedBase(ABC):
     def remove_from_db(self, session):
         assert not self.is_deleted, 'double deletion of id %s' % repr(self.row_id)
         session.query(self.table_class).filter(self.id_col_property() == self.row_id).delete()
-        self.row_id = None
         self.is_deleted = True
+        self.update_dependencies(session)
+        del self.object_index[self.__class__.__name__][self.row_id]
+        self.row_id = None
 
     def update_dependencies(self, session):
         """ Called if an instance is created from a DataBase entry. Loads the linked objects. """
@@ -206,6 +209,10 @@ class Project(MappedBase):
         self.project_id = project_id
         # == end DB mapping
         self.files = {}  # relative path as key -> easier folder comparison
+
+    def update_dependencies(self, session):
+        self.load_files(session)
+        # ToDo: delete File objects on delete
 
     def load_files(self, session):
         file_rows = session.query(TabFile)\
@@ -302,13 +309,32 @@ class File(MappedBase):
         self.size = size
         self.outdated = outdated
         # == end DB mapping
-        # relationships are reserved names in the underlying mapping class, but not synced to this class
-        self.chunks = None
+
+    def update_dependencies(self, session):
+        self.load_chunks(session)
+        # ToDo: drop chunks on delete
 
     def set_size(self, base_path):
         if self.is_folder:
             return
         self.size = get_file_size(os.path.join(base_path, self.path, self.name))
+
+    @property
+    def project(self):
+        """ Get the project from object cache.
+
+        :rtype: Project
+        """
+        return self.object_index['Project'].get(self.project_id)
+
+    @property
+    def chunks(self):
+        """ Get the chunks from object cache.
+
+        :rtype: dict
+        """
+        return to_ordered_dict({x.row_id: x for x in self.object_index['Chunk'].values()
+                                if x.file_id == self.file_id and not x.is_deleted})
 
     def load_chunks(self, session):
         if not self.file_id:
@@ -316,12 +342,14 @@ class File(MappedBase):
         chunk_rows = session.query(TabChunk)\
             .filter(TabChunk.file_id == self.file_id)\
             .all()
-        loaded_chunks = [Chunk.from_db(session, row=row) for row in chunk_rows]
-        if not len(loaded_chunks):
-            self.chunks = []
-            return
-        offsets = {x.start_offset for x in loaded_chunks}
-        ends = {x.start_offset + x.size for x in loaded_chunks}
+        # load into object_cache
+        for row in chunk_rows:
+            Chunk.from_db(session, row=row)
+
+    def verify_chunk_ranges(self):
+        # ToDo: use on operations
+        offsets = {x.start_offset for x in self.chunks.values()}
+        ends = {x.start_offset + x.size for x in self.chunks.values()}
         remaining = (offsets - ends) | (ends - offsets)
         if 0 not in remaining:
             raise ChunkBoundaryError('no Chunk with offset 0!')
@@ -329,18 +357,15 @@ class File(MappedBase):
             raise ChunkBoundaryError('Chunks don\'t add up to file size!')
         if len(remaining) > 2:
             raise ChunkBoundaryError('Chunks boundaries are not aligned!')
-        self.chunks = to_ordered_dict({x.row_id: x for x in loaded_chunks})
-        
+
     def drop_chunks(self, session=None):
         with make_session(session) as session:
             for chunk in self.chunks.values():
                 chunk.remove_from_db(session)
-        self.chunks = OrderedDict([x for x in self.chunks.items() if not x[1].is_deleted])
         
     def drop_chunk(self, chunk, session):
-        assert chunk.row_id in {x for x in self.chunks}
+        assert chunk.row_id in self.chunks
         chunk.remove_from_db(session)
-        del self.chunks[chunk.row_id]
 
 
 class Chunk(MappedBase):
@@ -378,9 +403,8 @@ class Chunk(MappedBase):
         self.derived_key_setup = None
 
     def update_dependencies(self, session):
-        if self.derived_key_setup_id is None:
-            return
-        self.derived_key_setup = DerivedKeySetup.from_db(session, row_id=self.derived_key_setup_id)
+        if self.derived_key_setup_id is not None:
+            self.derived_key_setup = DerivedKeySetup.from_db(session, row_id=self.derived_key_setup_id)
 
     def set_key_setup(self, derived_key_setup):
         """ Set the encryption key setup to use.
@@ -465,6 +489,12 @@ class InventoryResponse(MappedBase):
         self.status = status
         self.body = body
         # == end DB mapping
+        self.request = None
+
+    def update_dependencies(self, session):
+        if self.request_id is None:
+            return
+        self.request = InventoryRequest.from_db(session, row_id=self.request_id)
 
 
 class InventoryHandler:
@@ -485,25 +515,24 @@ class InventoryHandler:
         return request
 
     @staticmethod
-    def store_response(request_id, response_dict):
+    def store_response(request, response_dict):
         kwargs = {
             'retrieved_dt': datetime.datetime.utcnow(),
             'content_type': response_dict['contentType'],
             'status': response_dict['status'],
             'body': response_dict['body'].read(),
-            'request_id': request_id
+            'request_id': request.row_id
         }
         with make_session() as session:
             response_row = session.query(TabInventoryResponse)\
-                .filter(TabInventoryResponse.request_id == request_id)\
+                .filter(TabInventoryResponse.request_id == request.row_id)\
                 .first()
             if response_row is None:
                 response = InventoryResponse(**kwargs)
-                response.create_db_entry(session)
             else:
                 response = InventoryResponse.from_db(session, row=response_row)
                 response.update_from(**kwargs)
-                response.update_db(session)
+            response.update_db(session)
         return response
 
     def get_open_requests(self):
