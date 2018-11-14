@@ -423,6 +423,31 @@ class TestProject(DatabaseSetup):
         project = datatypes.Project(base_path=os.path.join(tmp_dir.name, '..'), name='foo')
         self.assertEqual(os.path.dirname(os.path.abspath(tmp_dir.name)), project.base_path)
 
+    def test_file_handling(self):
+        tmp_dir = TemporaryDirectory()
+        subdir_1 = os.path.join(tmp_dir.name, 'foo1')
+        subdir_2 = os.path.join(tmp_dir.name, 'foo2')
+        subsubdir = os.path.join(subdir_1, 'foo3')
+        os.makedirs(subsubdir)
+        os.makedirs(subdir_2)
+        open(os.path.join(subdir_1, 'bar11'), 'wb').close()
+        open(os.path.join(subdir_1, 'bar12'), 'wb').close()
+        open(os.path.join(subdir_2, 'bar21'), 'wb').close()
+        open(os.path.join(subsubdir, 'bar31'), 'wb').close()
+        open(os.path.join(subsubdir, 'bar32'), 'wb').close()
+        open(os.path.join(tmp_dir.name, 'bar01'), 'wb').close()
+        project = datatypes.Project(base_path=tmp_dir.name, name='foo')
+        with datatypes.make_session() as session:
+            project.create_db_entry(session)
+        project.add_files([
+            subdir_1,  # folder
+            os.path.join(subdir_1, 'bar11'),  # file in tracked folder
+            os.path.join(tmp_dir.name, 'bar01'),  # file in root dir
+            os.path.join(subdir_2, 'bar21')  # file in untracked subdir
+        ])
+        self.assertEqual(len(project.files), 5)
+        print(project.files)
+        self.fail()
 
 
 class TestOther(DatabaseSetup):

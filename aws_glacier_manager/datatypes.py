@@ -2,6 +2,7 @@ import os
 import datetime
 from collections import OrderedDict, defaultdict
 import glob
+from pathlib import Path
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from itertools import chain
@@ -204,7 +205,7 @@ class Project(MappedBase):
         super(Project, self).__init__()
         # == begin DB mapping
         self.name = name
-        self.base_path = os.path.abspath(base_path)
+        self.base_path = str(Path(base_path).resolve())
         self.vault = vault
         self.project_id = project_id
         # == end DB mapping
@@ -212,7 +213,8 @@ class Project(MappedBase):
 
     def update_dependencies(self, session):
         self.load_files(session)
-        # ToDo: delete File objects on delete
+        if self.is_deleted:
+            self.drop_files(session)
 
     def load_files(self, session):
         file_rows = session.query(TabFile)\
@@ -220,16 +222,16 @@ class Project(MappedBase):
             .all()
         loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
-        self.update_folders()
+        if Path(self.base_path).exists():
+            self.update_folders()
 
     def update_folders(self):
-        for file in self.files.values():
-            if not file.is_folder:
-                continue
-            self.update_folder(file)
+        for file in [x for x in self.files.values()]:
+            if file.is_folder:
+                self.update_folder(file)
 
     def update_folder(self, file):
-        paths = [self._to_relative_path(x) for x in glob.glob(os.path.join(self.base_path, file.path, '*'))]
+        paths = [x for x in glob.glob(os.path.join(self.base_path, file.path, '*'))]
         # ignore known stuff. its subfolders are handled by another loop run in self.update_folders
         paths = [x for x in paths if x not in self.files]
         if not len(paths):
@@ -239,13 +241,13 @@ class Project(MappedBase):
             if file.is_folder:
                 self.update_folder(file)
 
-    def add_file(self, path):
-        path, relative_path = self._to_relative_path(path)
+    def _add_file(self, path):
+        relative_path = self._to_relative_path(path)
         if relative_path in self.files:
             return None
         file = File(
             name=os.path.basename(path),
-            path=relative_path,
+            path=os.path.dirname(relative_path),
             project_id=self.project_id,
             is_folder=os.path.isdir(path)
         )
@@ -255,16 +257,18 @@ class Project(MappedBase):
         return file
 
     def _to_relative_path(self, path):
-        path = os.path.abspath(path)
-        assert os.path.commonpath([path, self.base_path]) == self.base_path
-        relative_path = os.path.relpath(path, self.base_path)
-        return path, relative_path
+        abspath = os.path.abspath(path)
+        print(abspath, self.base_path)
+        assert os.path.commonpath([abspath, self.base_path]) == self.base_path
+        relative_path = os.path.relpath(abspath, self.base_path)
+        return relative_path
 
     def add_files(self, paths, update=True):
         files = []
         with make_session() as session:
             for path in paths:
-                file = self.add_file(path)
+                print(path)
+                file = self._add_file(path)
                 if file is not None:
                     file.create_db_entry(session)
                     files.append(file)
@@ -277,8 +281,8 @@ class Project(MappedBase):
         with make_session() as session:
             return [cls.from_db(session, row=row) for row in session.query(cls.table_class).all()]
 
-    def drop_files(self):
-        with make_session() as session:
+    def drop_files(self, session=None):
+        with make_session(session) as session:
             for file in self.files:
                 file.remove_from_db(session)
         self.files = {x: y for x, y in self.files.items() if not y.is_deleted}
@@ -312,11 +316,13 @@ class File(MappedBase):
 
     def update_dependencies(self, session):
         self.load_chunks(session)
-        # ToDo: drop chunks on delete
+        if self.is_deleted:
+            self.drop_chunks(session)
 
     def set_size(self, base_path):
         if self.is_folder:
             return
+        print(base_path, self.path, self.name)
         self.size = get_file_size(os.path.join(base_path, self.path, self.name))
 
     @property
