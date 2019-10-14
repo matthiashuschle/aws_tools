@@ -9,7 +9,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Binary, ForeignKey, Dat
 from sqlalchemy.orm import relationship
 from contextlib import contextmanager
 from sqlalchemy.orm import sessionmaker
-from . import config
+from . import local_cfg
 
 
 class TableUtility:
@@ -128,7 +128,7 @@ TabInventoryRequest.response = relationship('TabInventoryResponse', order_by=Tab
 class SessionContext:
 
     def __init__(self, connector_str=None):
-        connector_str = connector_str or config.config['database']['connector']
+        connector_str = connector_str or local_cfg.LocalConfig().remote_db
         self.engine = create_engine(connector_str)
         self.session_fac = sessionmaker(bind=self.engine)
 
@@ -161,6 +161,6 @@ def create_tables():
 
 
 def set_test():
-    config.load_test()
-    make_session.set_engine(config.config['database']['connector'])
-    create_tables()
+    with local_cfg.LocalConfig.test_mode():
+        make_session.set_engine(local_cfg.LocalConfig().remote_db)
+        create_tables()

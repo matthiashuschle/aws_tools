@@ -582,5 +582,6 @@ def get_overview():
 
     :rtype: list
     """
+    database.create_tables()
     projects = [x for x in sorted(Project.load_all(), key=lambda p: (p.vault, p.name))]
     return projects

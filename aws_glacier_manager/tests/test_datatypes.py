@@ -3,11 +3,10 @@ from unittest import TestCase
 from io import BytesIO
 from collections import defaultdict
 from tempfile import TemporaryDirectory
-from .. import config
+from .. import local_cfg
 from .. import database
 from .. import datatypes
 database.set_test()
-config.load_test()
 
 
 class DatabaseSetup(TestCase):
@@ -36,30 +35,32 @@ class DatabaseSetup(TestCase):
 
 class TestInventoryLog(DatabaseSetup):
 
+    @local_cfg.LocalConfig.test_mode()
     def test_init(self):
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         # print(config.config['vault']['name'])
         handler.store_request({'jobId': 'abc'})
         del handler
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         self.assertTrue(len(handler.get_open_requests()))
 
+    @local_cfg.LocalConfig.test_mode()
     def test_store_request(self):
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         request = handler.store_request({'jobId': 'abc'})
         self.assertIsInstance(request, datatypes.InventoryRequest)
         self.assertEqual(request.request_id, 1)
         self.assertEqual(request.job_id, 'abc')
         self.assertIsNotNone(request.sent_dt)
-        self.assertEqual(request.vault_name, config.config['vault']['name'])
+        self.assertEqual(request.vault_name, local_cfg.LocalConfig().default_vault)
         del handler
         with datatypes.make_session() as session:
             request = datatypes.InventoryRequest.from_db(session, row_id=1)
         self.assertEqual(request.request_id, 1)
         self.assertEqual(request.job_id, 'abc')
         self.assertIsNotNone(request.sent_dt)
-        self.assertEqual(request.vault_name, config.config['vault']['name'])
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        self.assertEqual(request.vault_name, local_cfg.LocalConfig().default_vault)
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         self.assertEqual(len(handler.get_open_requests()), 1)
         # store another one
         request = handler.store_request({'jobId': 'abcd'})
@@ -71,18 +72,19 @@ class TestInventoryLog(DatabaseSetup):
         self.assertEqual(request.request_id, 1)
         self.assertEqual(request.job_id, 'abc')
         self.assertIsNotNone(request.sent_dt)
-        self.assertEqual(request.vault_name, config.config['vault']['name'])
+        self.assertEqual(request.vault_name, local_cfg.LocalConfig().default_vault)
         with datatypes.make_session() as session:
             request = datatypes.InventoryRequest.from_db(session, row_id=2)
         self.assertEqual(request.request_id, 2)
         self.assertEqual(request.job_id, 'abcd')
         self.assertIsNotNone(request.sent_dt)
-        self.assertEqual(request.vault_name, config.config['vault']['name'])
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        self.assertEqual(request.vault_name, local_cfg.LocalConfig().default_vault)
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         self.assertEqual(len(handler.get_open_requests()), 2)
 
+    @local_cfg.LocalConfig.test_mode()
     def test_store_response(self):
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         request = handler.store_request({'jobId': 'abc'})
         response_dict = {
             'ResponseMetadata': {
@@ -139,8 +141,9 @@ class TestInventoryLog(DatabaseSetup):
         self.assertEqual(response.body, b'12345')
         self.assertIs(response.request, request)
 
+    @local_cfg.LocalConfig.test_mode()
     def test_get_open_requests(self):
-        handler = datatypes.InventoryHandler(config.config['vault']['name'])
+        handler = datatypes.InventoryHandler(local_cfg.LocalConfig().default_vault)
         self.assertEqual(0, len(handler.get_open_requests()))
         handler.store_request({'jobId': 'abc'})
         self.assertEqual(1, len(handler.get_open_requests()))
