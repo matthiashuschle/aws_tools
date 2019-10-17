@@ -416,10 +416,12 @@ class TestProject(DatabaseSetup):
         datatypes.Project.clear_object_index()
         with datatypes.make_session() as session:
             p1 = datatypes.Project.from_db(session, 1)
+            p1.base_path = tmp_dir.name
             self.assertEqual('foo', p1.name)
             self.assertEqual(tmp_dir.name, p1.base_path)
             self.assertIsNone(p1.vault)
             p2 = datatypes.Project.from_db(session, 2)
+            p2.base_path = tmp_dir.name
             self.assertEqual('bar', p2.name)
             self.assertEqual(tmp_dir.name, p2.base_path)
             self.assertEqual('abc', p2.vault)

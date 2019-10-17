@@ -36,7 +36,6 @@ class TabProject(BackupLogBase):
 
     project_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
-    base_path = Column(String, nullable=False)
     vault = Column(String)
 
 

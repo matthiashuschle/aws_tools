@@ -199,17 +199,27 @@ class Project(MappedBase):
 
     table_class = TabProject
     optional_cols = ['vault', table_class.id_column]
-    required_cols = ['base_path', 'name']
+    required_cols = ['name']
 
-    def __init__(self, name, base_path, vault=None, project_id=None):
+    def __init__(self, name, vault=None, project_id=None, base_path=None):
         super(Project, self).__init__()
         # == begin DB mapping
         self.name = name
-        self.base_path = str(Path(base_path).resolve())
         self.vault = vault
         self.project_id = project_id
         # == end DB mapping
+        self._base_path = None if base_path is None else str(Path(base_path).resolve())  # only local
         self.files = {}  # relative path as key -> easier folder comparison
+
+    @property
+    def base_path(self) -> str:
+        return self._base_path
+
+    @base_path.setter
+    def base_path(self, val):
+        self._base_path = None if val is None else str(Path(val).resolve())
+        if self._base_path and Path(self._base_path).exists():
+            self.update_folders()
 
     def update_dependencies(self, session):
         self.load_files(session)
@@ -222,7 +232,7 @@ class Project(MappedBase):
             .all()
         loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
-        if Path(self.base_path).exists():
+        if self.base_path and Path(self.base_path).exists():
             self.update_folders()
 
     def update_folders(self):
