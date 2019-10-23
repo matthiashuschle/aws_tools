@@ -5,7 +5,7 @@ The Definitions are used by classes in datatypes.py
 import warnings
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Boolean, Binary, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, LargeBinary, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from contextlib import contextmanager
 from sqlalchemy.orm import sessionmaker
@@ -66,8 +66,8 @@ class TabDerivedKeySetup(BackupLogBase):
     mem = Column(Integer, nullable=False)
     key_size_enc = Column(Integer, nullable=False)
     key_size_sig = Column(Integer, default=0)
-    salt_key_enc = Column(Binary, nullable=False)
-    salt_key_sig = Column(Binary, default=b'')
+    salt_key_enc = Column(LargeBinary, nullable=False)
+    salt_key_sig = Column(LargeBinary, default=b'')
 
 
 class TabChunk(BackupLogBase):
@@ -78,8 +78,8 @@ class TabChunk(BackupLogBase):
     upload_id = Column(String)
     checksum = Column(String)
     signature_type = Column(String)
-    signature = Column(Binary)
-    verify_key = Column(Binary)
+    signature = Column(LargeBinary)
+    verify_key = Column(LargeBinary)
     start_offset = Column(Integer, nullable=False)
     size = Column(Integer, nullable=False)
     encrypted = Column(Boolean, default=False)
@@ -115,7 +115,7 @@ class TabInventoryResponse(BackupLogBase):
     retrieved_dt = Column(DateTime, nullable=False)
     content_type = Column(String)
     status = Column(Integer)
-    body = Column(Binary)
+    body = Column(LargeBinary)
 
 
 TabInventoryRequest.response = relationship('TabInventoryResponse', order_by=TabInventoryResponse.response_id,
