@@ -1,4 +1,5 @@
 import logging
+import pathlib
 from . import local_cfg
 from . import datatypes
 
@@ -45,14 +46,31 @@ class ProjectInterface:
         self.name = name
         self._local_cfg = local_cfg.LocalConfig()
         self._project_dict = self._local_cfg.local_projects.get(name, {})
+        self._db_project = None
 
     @property
     def exists(self):
         return bool(self.project_dict)
 
     def _update(self):
-        self._local_cfg.local_projects[self.name] = self.project_dict
+        if not self.project_dict:
+            del self._local_cfg.local_projects[self.name]
+        else:
+            self._local_cfg.local_projects[self.name] = self.project_dict
         self._local_cfg.write_cfg_file()
+
+    @property
+    def db_project(self):
+        assert self.local_root
+        if self._db_project is None:
+            obj = datatypes.Project.load_named(self.name)
+            if obj is None:
+                obj = datatypes.Project(name=self.name, vault=self._local_cfg.default_vault)
+                with datatypes.make_session() as session:
+                    obj.create_db_entry(session)
+            obj.base_path = self.local_root
+            self._db_project = obj
+        return self._db_project
 
     @property
     def project_dict(self):
@@ -64,9 +82,24 @@ class ProjectInterface:
 
     @local_root.setter
     def local_root(self, val):
+        logger = logging.getLogger(__name__)
+        if not val:
+            if self.exists:
+                logger.info('deleting local project %s' % self.name)
+                self._project_dict = {}
+                self._update()
+            else:
+                logger.warning('empty local root path for new project -> ignoring')
+            return
         if not self.exists:
-            logging.getLogger(__name__).info('creating project %s' % self.name)
+            logger.info('creating project %s' % self.name)
         else:
-            logging.getLogger(__name__).info('previous root path: %s' % str(self.local_root))
+            logger.info('previous root path: %s' % str(self.local_root))
         self.project_dict[self.KEY_ROOT] = val
         self._update()
+
+    def db_add_files(self, filepaths):
+        self.db_project.add_files([pathlib.Path(x).absolute() for x in filepaths])
+
+    def db_remove_files(self, filepaths):
+        self.db_project.remove_files([pathlib.Path(x).absolute() for x in filepaths])

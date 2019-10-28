@@ -44,7 +44,6 @@ class TabFile(BackupLogBase):
     id_column = 'file_id'
 
     file_id = Column(Integer, primary_key=True, autoincrement=True)
-    is_folder = Column(Boolean, default=False)
     name = Column(String, nullable=False)
     path = Column(String, nullable=False)
     size = Column(Integer)

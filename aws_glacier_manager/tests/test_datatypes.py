@@ -1,6 +1,7 @@
 import os
 from unittest import TestCase
 from io import BytesIO
+from pathlib import Path
 from collections import defaultdict
 from tempfile import TemporaryDirectory
 from .. import local_cfg
@@ -307,18 +308,15 @@ class TestFile(DatabaseSetup):
         testfiles = [
             datatypes.File(path='', name='tmpfile_a', project_id=project.row_id),
             datatypes.File(path='subdir', name='tmpfile_b', project_id=project.row_id),
-            datatypes.File(path='', name='subdir', project_id=project.row_id, is_folder=True)
         ]
         with datatypes.make_session() as session:
             for f in testfiles:
                 f.create_db_entry(session)
-        self.assertEqual([False, False, True], [x.is_folder for x in testfiles])
-        self.assertEqual([None, None, None], [x.size for x in testfiles])
-        self.assertEqual([False, False, False], [x.outdated for x in testfiles])
+        self.assertEqual([None, None], [x.size for x in testfiles])
+        self.assertEqual([False, False], [x.outdated for x in testfiles])
         for f in testfiles:
             f.set_size(project.base_path)
-        self.assertEqual([False, False, True], [x.is_folder for x in testfiles])
-        self.assertEqual([5, 6, None], [x.size for x in testfiles])
+        self.assertEqual([5, 6], [x.size for x in testfiles])
 
     def test_chunks(self):
         tmp_dir, project = self.create_project()
@@ -427,6 +425,13 @@ class TestProject(DatabaseSetup):
             self.assertEqual('abc', p2.vault)
         project = datatypes.Project(base_path=os.path.join(tmp_dir.name, '..'), name='foo')
         self.assertEqual(os.path.dirname(os.path.abspath(tmp_dir.name)), project.base_path)
+        datatypes.Project.clear_object_index()
+        assert datatypes.Project.load_named('abcd') is None
+        p1 = datatypes.Project.load_named('foo')
+        p1.base_path = tmp_dir.name
+        self.assertEqual('foo', p1.name)
+        self.assertEqual(tmp_dir.name, p1.base_path)
+        self.assertIsNone(p1.vault)
 
     def test_file_handling(self):
         tmp_dir = TemporaryDirectory()
@@ -445,14 +450,13 @@ class TestProject(DatabaseSetup):
         with datatypes.make_session() as session:
             project.create_db_entry(session)
         project.add_files([
-            subdir_1,  # folder
-            os.path.join(subdir_1, 'bar11'),  # file in tracked folder
-            os.path.join(tmp_dir.name, 'bar01'),  # file in root dir
-            os.path.join(subdir_2, 'bar21')  # file in untracked subdir
+            Path(os.path.join(subdir_1, 'bar11')),  # file in tracked folder
+            Path(os.path.join(tmp_dir.name, 'bar01')),  # file in root dir
+            Path(subsubdir)  # file in untracked subdir
         ])
-        self.assertEqual(len(project.files), 5)
+        self.assertEqual(len(project.files), 4)
         print(project.files)
-        self.fail()
+        # ToDo: check details of stored files
 
 
 class TestOther(DatabaseSetup):

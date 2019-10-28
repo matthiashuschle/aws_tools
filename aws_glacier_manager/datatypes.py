@@ -2,7 +2,9 @@ import os
 import datetime
 from collections import OrderedDict, defaultdict
 import glob
+from typing import Union, List
 from pathlib import Path
+import logging
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from itertools import chain
@@ -218,13 +220,11 @@ class Project(MappedBase):
     @base_path.setter
     def base_path(self, val):
         self._base_path = None if val is None else str(Path(val).resolve())
-        if self._base_path and Path(self._base_path).exists():
-            self.update_folders()
 
     def update_dependencies(self, session):
         self.load_files(session)
         if self.is_deleted:
-            self.drop_files(session)
+            self.remove_all_files(session)
 
     def load_files(self, session):
         file_rows = session.query(TabFile)\
@@ -232,58 +232,73 @@ class Project(MappedBase):
             .all()
         loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
-        if self.base_path and Path(self.base_path).exists():
-            self.update_folders()
 
-    def update_folders(self):
-        for file in [x for x in self.files.values()]:
-            if file.is_folder:
-                self.update_folder(file)
+    def _get_folder_content(self, path: Path) -> List[Path]:
+        """ Get content of a single folder, excluding known files. """
+        content = [x for x in Path(self.base_path).joinpath(path).iterdir()
+                   if str(x.relative_to(self.base_path)) not in self.files]
+        return content
 
-    def update_folder(self, file):
-        paths = [x for x in glob.glob(os.path.join(self.base_path, file.path, '*'))]
-        # ignore known stuff. its subfolders are handled by another loop run in self.update_folders
-        paths = [x for x in paths if x not in self.files]
-        if not len(paths):
-            return
-        files = self.add_files(paths, update=False)
-        for file in files:
-            if file.is_folder:
-                self.update_folder(file)
+    def _add_file(self, path: Path) -> 'Union[File, None]':
+        """ Add a single file.
 
-    def _add_file(self, path):
-        relative_path = self._to_relative_path(path)
-        if relative_path in self.files:
+        Returns None if it is already known.
+        May raise IsADirectoryError.
+
+        :param str path: file path
+        :rtype: File
+        """
+        assert not path.is_absolute()
+        full_path = Path(self.base_path).joinpath(path)
+        if str(path) in self.files:
             return None
+        if not full_path.exists():
+            raise FileNotFoundError
+        if full_path.is_dir():
+            raise IsADirectoryError
         file = File(
-            name=os.path.basename(path),
-            path=os.path.dirname(relative_path),
+            name=path.name,
+            path=str(path.parent),
             project_id=self.project_id,
-            is_folder=os.path.isdir(path)
         )
-        if not file.is_folder:
-            file.set_size(self.base_path)
-        self.files[relative_path] = file
+        file.set_size(self.base_path)
+        self.files[str(path)] = file
         return file
 
-    def _to_relative_path(self, path):
-        abspath = os.path.abspath(path)
-        print(abspath, self.base_path)
-        assert os.path.commonpath([abspath, self.base_path]) == self.base_path
-        relative_path = os.path.relpath(abspath, self.base_path)
-        return relative_path
+    def _to_relative_paths(self, paths: List[Path]) -> List[Path]:
+        """ Convert list of paths to relative to base_path. """
+        assert self.base_path
+        for path in paths:
+            if '..' in path.parts:
+                raise OSError('can not handle ".." in path, might break due to symlinks: %s' % path)
+            if not len(path.name):
+                raise OSError('empty file name is illegal: %s' % path)
+        return [path.absolute().relative_to(self.base_path) for path in paths]
 
-    def add_files(self, paths, update=True):
+    def add_files(self, paths: List[Path], session=None) -> List['File']:
+        """ Add files given in list, including subdirectory content.
+
+        Folders are not added, but their containing files are.
+        """
+        paths = self._to_relative_paths(paths)
         files = []
-        with make_session() as session:
+        with make_session(session=session) as session:
             for path in paths:
                 print(path)
-                file = self._add_file(path)
+                try:
+                    file = self._add_file(path)
+                except FileNotFoundError:
+                    logging.getLogger(__name__).warning('file not found: %s' % path)
+                    continue
+                except IsADirectoryError:
+                    files.extend(self.add_files(
+                        paths=self._get_folder_content(path),
+                        session=session,
+                    ))
+                    continue
                 if file is not None:
                     file.create_db_entry(session)
                     files.append(file)
-        if update:
-            self.update_folders()
         return files
 
     @classmethod
@@ -291,26 +306,55 @@ class Project(MappedBase):
         with make_session() as session:
             return [cls.from_db(session, row=row) for row in session.query(cls.table_class).all()]
 
-    def drop_files(self, session=None):
+    @classmethod
+    def load_named(cls, name):
+        with make_session() as session:
+            row = session.query(cls.table_class).filter(TabProject.name == name).first()
+            if not row:
+                return None
+            return cls.from_db(session=session, row=row)
+
+    def remove_all_files(self, session=None):
         with make_session(session) as session:
             for file in self.files:
                 file.remove_from_db(session)
         self.files = {x: y for x, y in self.files.items() if not y.is_deleted}
 
-    def drop_file(self, file, session):
+    def remove_files(self, paths: List[Path], session=None):
+        """ Remove files. Acts like add_files, but removes them.
+        """
+        paths = self._to_relative_paths(paths)
+        files_rel = {}
+        for path in paths:
+            print(path)
+            path_rel = str(path)
+            if path_rel in self.files:
+                files_rel[path_rel] = self.files[path_rel]
+                continue
+            # could be folder
+            subcontent = {x: y for x, y in self.files.items() if str(y.path).startswith(path_rel)}
+            if not len(subcontent):
+                logging.getLogger(__name__).warning('file not found: %s' % path)
+            else:
+                files_rel.update(subcontent)
+        with make_session(session=session) as session:
+            for path_rel, file in files_rel:
+                self._drop_file(file, session)
+
+    def _drop_file(self, file, session):
         assert file.row_id in {x.row_id for x in self.files}
         file.remove_from_db(session)
-        del self.files[file.path]
+        del self.files[str(file.path_obj)]
 
 
 class File(MappedBase):
 
     table_class = TabFile
-    optional_cols = ['is_folder', 'size', 'outdated', table_class.id_column]
+    optional_cols = ['size', 'outdated', table_class.id_column]
     required_cols = ['path', 'name', 'project_id']
 
     def __init__(self, path, name, project_id,
-                 is_folder=None, size=None, outdated=None, file_id=None):
+                 size=None, outdated=None, file_id=None):
         """ init signature reflects non-nullable (args), nullable (=None) and default values (=value)
         of ORM-class. """
         super(File, self).__init__()
@@ -319,7 +363,6 @@ class File(MappedBase):
         self.name = name
         self.path = path
         self.project_id = project_id
-        self.is_folder = is_folder  # this should be set on creation!
         self.size = size
         self.outdated = outdated
         # == end DB mapping
@@ -330,8 +373,6 @@ class File(MappedBase):
             self.drop_chunks(session)
 
     def set_size(self, base_path):
-        if self.is_folder:
-            return
         print(base_path, self.path, self.name)
         self.size = get_file_size(os.path.join(base_path, self.path, self.name))
 
@@ -351,6 +392,10 @@ class File(MappedBase):
         """
         return to_ordered_dict({x.row_id: x for x in self.object_index['Chunk'].values()
                                 if x.file_id == self.file_id and not x.is_deleted})
+
+    @property
+    def path_obj(self):
+        return Path(self.path).joinpath(Path(self.name))
 
     def load_chunks(self, session):
         if not self.file_id:

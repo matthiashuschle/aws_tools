@@ -3,8 +3,6 @@ import argparse
 import logging
 from aws_glacier_manager import interface
 
-_PARSER_ALL = 'PARSER_ALL'
-
 
 def setup_parser():
     parser = argparse.ArgumentParser(description='Manage AWS Glacier storage.')
@@ -33,7 +31,7 @@ def setup_parser():
         ('pull', 'download data', 'filepath'),
     ]:
         proj_subparsers.add_parser(cmd, help=help_cmd).add_argument(
-            'filepaths', nargs='*', default=_PARSER_ALL, help=help_arg
+            'filepaths', nargs='*', help=help_arg
         )
     return parser
 
@@ -62,17 +60,23 @@ def process_cfg(db_string, list_projects, default_vault):
 
 
 def process_project(project, action, args):
+    logger = logging.getLogger(__name__)
     project = interface.ProjectInterface(project)
     if action == 'set_local_root':
         project.local_root = args.local_root
-    elif action == 'status':
+        return
+    elif not project.exists:
+        logger.warning('project %s does not exist' % project)
+        return
+    if action == 'status':
         # ToDo: print root, files, excluded, and sync status
         pass
     elif action == 'add':
-        pass
+        project.db_add_files(args.filepaths)
     elif action == 'remove':
-        pass
+        project.db_remove_files(args.filepaths)
     elif action == 'update':
+
         pass
     elif action == 'push':
         pass

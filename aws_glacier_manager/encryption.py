@@ -22,6 +22,9 @@ CHUNK_SIZE = 16 * 1024
 DerivedKey = namedtuple('DerivedKey', ['key_enc', 'key_sig', 'setup'])
 
 
+# ToDo: is streaming a case for "yield from"?
+
+
 def create_keys(out_path, replace=False):
     """ Simple random key generation. They are highly random, but only of use
     if you can store them safely. Try :meth:`create_keys_from_password` otherwise.
