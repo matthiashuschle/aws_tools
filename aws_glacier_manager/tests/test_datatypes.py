@@ -399,7 +399,6 @@ class TestFile(DatabaseSetup):
         self.assertEqual(len(testfile.chunks), 0)
 
 
-# ToDo: basic tests for Project
 class TestProject(DatabaseSetup):
 
     def test_init(self):
@@ -450,13 +449,36 @@ class TestProject(DatabaseSetup):
         with datatypes.make_session() as session:
             project.create_db_entry(session)
         project.add_files([
-            Path(os.path.join(subdir_1, 'bar11')),  # file in tracked folder
+            Path(os.path.join(subdir_1, 'bar11')),
             Path(os.path.join(tmp_dir.name, 'bar01')),  # file in root dir
-            Path(subsubdir)  # file in untracked subdir
+            Path(subsubdir)  # full subfolder
         ])
         self.assertEqual(len(project.files), 4)
-        print(project.files)
-        # ToDo: check details of stored files
+        assert project.files['foo1/bar11'].name == 'bar11'
+        assert project.files['foo1/bar11'].path == 'foo1'
+        assert project.files['bar01'].name == 'bar01'
+        assert project.files['bar01'].path == '.'
+        assert project.files['foo1/foo3/bar31'].name == 'bar31'
+        assert project.files['foo1/foo3/bar31'].path == 'foo1/foo3'
+        assert project.files['foo1/foo3/bar32'].name == 'bar32'
+        assert project.files['foo1/foo3/bar32'].path == 'foo1/foo3'
+        project.remove_files([
+            Path(os.path.join(subdir_1, 'bar11abc')),  # unknown file
+            Path(os.path.join(tmp_dir.name, 'bar01')),
+        ])
+        self.assertEqual(len(project.files), 3)
+        assert project.files['foo1/bar11'].name == 'bar11'
+        assert project.files['foo1/bar11'].path == 'foo1'
+        assert project.files['foo1/foo3/bar31'].name == 'bar31'
+        assert project.files['foo1/foo3/bar31'].path == 'foo1/foo3'
+        assert project.files['foo1/foo3/bar32'].name == 'bar32'
+        assert project.files['foo1/foo3/bar32'].path == 'foo1/foo3'
+        project.remove_files([
+            Path(subsubdir)  # full subfolder
+        ])
+        self.assertEqual(len(project.files), 1)
+        assert project.files['foo1/bar11'].name == 'bar11'
+        assert project.files['foo1/bar11'].path == 'foo1'
 
 
 class TestOther(DatabaseSetup):

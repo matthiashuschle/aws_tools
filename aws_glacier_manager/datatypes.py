@@ -332,17 +332,27 @@ class Project(MappedBase):
                 files_rel[path_rel] = self.files[path_rel]
                 continue
             # could be folder
-            subcontent = {x: y for x, y in self.files.items() if str(y.path).startswith(path_rel)}
+            subcontent = {x: y for x, y in self.files.items() if self._path_contains(path, Path(y.path))}
             if not len(subcontent):
                 logging.getLogger(__name__).warning('file not found: %s' % path)
             else:
                 files_rel.update(subcontent)
         with make_session(session=session) as session:
-            for path_rel, file in files_rel:
+            for path_rel, file in files_rel.items():
                 self._drop_file(file, session)
 
+    @staticmethod
+    def _path_contains(parent: Path, child: Path) -> bool:
+        if parent == child:
+            return True
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
     def _drop_file(self, file, session):
-        assert file.row_id in {x.row_id for x in self.files}
+        assert file.row_id in {x.row_id for x in self.files.values()}
         file.remove_from_db(session)
         del self.files[str(file.path_obj)]
 
