@@ -2,8 +2,7 @@
 Handles encryption. Based on the awesome post of Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
-import os
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 import binascii
 import nacl.secret
 import nacl.utils
@@ -14,38 +13,68 @@ from nacl.exceptions import BadSignatureError
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from .datatypes import DerivedKeySetup
 
-SYMKEY = 'symkey.bin'
-AUTHKEY = 'authkey.bin'
 CHUNK_SIZE = 16 * 1024
 DerivedKey = namedtuple('DerivedKey', ['key_enc', 'key_sig', 'setup'])
 
 
-# ToDo: is streaming a case for "yield from"?
+class AsymKeyPair:
+
+    def __init__(self, pubkey=None, privkey=None):
+        """ Handles SSL key pair as cryptography object.
+
+        Intended for safe exchange of small data objects (like symmetric keys).
+        Both arguments must be cryptography library compatible RSA (or similar) Key
+        objects.
+        """
+        self.pubkey = pubkey
+        self.privkey = privkey
+
+    def encrypt(self, message, to_str=True):
+        enc = self.pubkey.encrypt(
+            message,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        if to_str:
+            return binascii.hexlify(enc).decode()
+        return enc
+
+    def decrypt(self, encrypted):
+        try:
+            encrypted = binascii.unhexlify(encrypted.encode())
+        except AttributeError:
+            # already bytes
+            pass
+        original_message = self.privkey.decrypt(
+            encrypted,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return original_message
 
 
-def create_keys(out_path, replace=False):
+def create_keys():
     """ Simple random key generation. They are highly random, but only of use
     if you can store them safely. Try :meth:`create_keys_from_password` otherwise.
 
-    :param str out_path: path to use for file output. If None, keys are returned.
-    :param bool replace: replace existing files.
     :rtype: tuple
     :returns: encryption key, signing key
     """
-    if out_path:
-        os.makedirs(out_path, exist_ok=True)
     # encryption key
     key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
     auth_key = nacl.utils.random(size=64)
-    if not out_path:
-        return key, auth_key
-    with open(os.path.join(out_path, SYMKEY), 'wb' if replace else 'xb') as f:
-        f.write(key)
-    # signature key
-    with open(os.path.join(out_path, AUTHKEY), 'wb' if replace else 'xb') as f:
-        f.write(auth_key)
+    return key, auth_key
 
 
 def create_keys_from_password(password, setup=None, enable_auth_key=False):
@@ -164,6 +193,7 @@ class CryptoHandler:
 
         The output size is the CHUNK SIZE, the chunks read are 40 bytes smaller to add nonce and chunk
         signature. HMAC signing of the full encrypted data is only done, if an auth_key is provided.
+        The signature is then available in `self.last_signature`.
 
         :param BytesIO plain_file_object: input file
         :param int read_total: maximum bytes to read
@@ -235,6 +265,78 @@ class CryptoHandler:
             raise ValueError('can not divide %i by %i!' % (enc_block_size, CHUNK_SIZE))
         n_chunks = enc_block_size // CHUNK_SIZE
         return n_chunks * (CHUNK_SIZE - 40)
+
+    def encrypt_keys_asymmetric(self, keypair):
+        """ Use public key from asymmetric keypair to encrypt symmetric keys.
+
+        Use `to_str=False` to generate binary instead of hexlified.
+
+        :param AsymKeyPair keypair: cryptography SSL RSA key pair or similar, see AsymKeyPair
+        :returns: tuple (encrypted secret key, encrypted auth key) where the latter might be None
+        """
+        enc_auth_key = None if not self.auth_key else keypair.encrypt(self.auth_key)
+        enc_secret_key = keypair.encrypt(self.secret_key)
+        return enc_secret_key, enc_auth_key
+
+    def create_info(self, keypair=None):
+        """ Create info dictionary, JSONifiable.
+
+        Should it store unencrypted keys?
+        If keypair is provided, they are encrypted by the public key.
+        """
+        enc_secret, enc_auth, signature = None, None, None
+        if self.last_signature:
+            signature = self.last_signature.decode()
+        if keypair:
+            enc_secret, enc_auth = self.encrypt_keys_asymmetric(keypair=keypair)
+        info = OrderedDict([
+            ('secret_key', enc_secret),
+            ('auth_key', enc_auth),
+            ('signature', signature),
+        ])
+        return info
+
+    @classmethod
+    def from_info(cls, info: dict, keypair: AsymKeyPair):
+        """ Create handler from info dict. """
+        auth_key = keypair.decrypt(info['auth_key']) if info['auth_key'] is not None else None
+        secret_key = keypair.decrypt(info['secret_key'])
+        inst = cls(secret_key, auth_key)
+        inst._last_signature = info['signature'].encode()
+
+
+def pubkey_from_string(pubkey_str):
+    """ Create a cryptography public SSL key instance from a public key string.
+
+    :param str pubkey_str: public key string
+    """
+    return serialization.load_ssh_public_key(
+        data=pubkey_str.encode(),
+        backend=default_backend()
+    )
+
+
+def pubkey_from_file(path):
+    """ Create a cryptography public SSL key instance from a public key file.
+
+    :param str path: public key filepath
+    """
+    with open(path, 'r') as f_in:
+        return pubkey_from_string(f_in.read())
+
+
+def privkey_from_pemfile(path, password=None):
+    """ Create a cryptography SSL private key instance from a PEM file (default SSH).
+
+    :param str path: filepath
+    :param bytearray password: private key passphrase (bytearray! Use getpass.getpass().encode() or similar)
+    """
+    with open(path, 'rb') as f_in:
+        return serialization.load_pem_private_key(
+            data=f_in.read(),
+            password=password,
+            backend=default_backend(),
+        )
 
 
 def _read_in_chunks(file_object, chunk_size=None, read_total=None):
