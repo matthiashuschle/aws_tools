@@ -11,8 +11,8 @@ from itertools import chain
 from . import database
 from .database import (make_session, TabProject, TabFile, TabDerivedKeySetup, TabChunk, 
                        TabInventoryRequest, TabInventoryResponse)
+from .encryption import DerivedKeySetup as DKS
 from sqlalchemy.sql.expression import null, func
-from nacl import pwhash, utils, secret
 
 
 # the ORM-classes are in database.py. They should not be used by any classes outside of this module.
@@ -488,43 +488,17 @@ class Chunk(MappedBase):
         self.derived_key_setup = derived_key_setup
 
 
-class DerivedKeySetup(MappedBase):
+class DerivedKeySetup(MappedBase, DKS):
 
     table_class = TabDerivedKeySetup
     optional_cols = [table_class.id_column, 'key_size_sig', 'salt_key_sig']
     required_cols = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
 
-    def __init__(self, construct, ops, mem, key_size_enc, salt_key_enc,
-                 key_size_sig=None, salt_key_sig=None, derived_key_setup_id=None):
-        super(DerivedKeySetup, self).__init__()
+    def __init__(self, *args, derived_key_setup_id=None, **kwargs):
+        super(DerivedKeySetup, self).__init__(*args, **kwargs)
         # == begin DB mapping
         self.derived_key_setup_id = derived_key_setup_id
-        self.construct = construct
-        self.ops = ops
-        self.mem = mem
-        self.key_size_enc = key_size_enc
-        self.key_size_sig = key_size_sig
-        self.salt_key_enc = salt_key_enc
-        self.salt_key_sig = salt_key_sig
         # == end DB mapping
-
-    @classmethod
-    def create_default(cls, enable_auth_key=False):
-        """ Create default settings for encryption key derivation from password.
-
-        original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
-        :param bool enable_auth_key: generate a key for full data signatures via HMAC
-        :rtype: DerivedKeySetup
-        """
-        return cls(
-            ops=pwhash.argon2i.OPSLIMIT_SENSITIVE,
-            mem=pwhash.argon2i.MEMLIMIT_SENSITIVE,
-            construct='argon2i',
-            salt_key_enc=utils.random(pwhash.argon2i.SALTBYTES),
-            salt_key_sig=utils.random(pwhash.argon2i.SALTBYTES) if enable_auth_key else b'',
-            key_size_enc=secret.SecretBox.KEY_SIZE,
-            key_size_sig=64 if enable_auth_key else 0
-        )
 
 
 class InventoryRequest(MappedBase):

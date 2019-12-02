@@ -1,5 +1,5 @@
 """
-Handles encryption. Based on the awesome post of Ynon Perek:
+Handles encryption. Based on the post of Ynon Perek:
 https://www.ynonperek.com/2017/12/11/how-to-encrypt-large-files-with-python-and-pynacl/
 """
 from collections import namedtuple, OrderedDict
@@ -16,7 +16,6 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from .datatypes import DerivedKeySetup
 
 CHUNK_SIZE = 16 * 1024
 DerivedKey = namedtuple('DerivedKey', ['key_enc', 'key_sig', 'setup'])
@@ -33,6 +32,7 @@ class AsymKeyPair:
         """
         self.pubkey = pubkey
         self.privkey = privkey
+        self.last_enc_info = None
 
     def encrypt(self, message, to_str=True):
         enc = self.pubkey.encrypt(
@@ -63,18 +63,44 @@ class AsymKeyPair:
         )
         return original_message
 
+    def encrypt_stream(self, stream_in, crypto_handler=None, enable_auth_key=False):
+        crypto_handler = crypto_handler or CryptoHandler.from_random(enable_auth_key)
+        yield from crypto_handler.encrypt_stream(stream_in)
+        self.last_enc_info = crypto_handler.create_info(keypair=self)
 
-def create_keys():
-    """ Simple random key generation. They are highly random, but only of use
-    if you can store them safely. Try :meth:`create_keys_from_password` otherwise.
+    def decrypt_stream(self, stream_in, enc_info):
+        handler = CryptoHandler.from_info(enc_info, keypair=self)
+        yield from handler.decrypt_stream(stream_in, signature=handler.last_signature)
 
-    :rtype: tuple
-    :returns: encryption key, signing key
-    """
-    # encryption key
-    key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
-    auth_key = nacl.utils.random(size=64)
-    return key, auth_key
+
+class DerivedKeySetup:
+    def __init__(self, construct, ops, mem, key_size_enc, salt_key_enc,
+                 key_size_sig=None, salt_key_sig=None):
+        self.construct = construct
+        self.ops = ops
+        self.mem = mem
+        self.key_size_enc = key_size_enc
+        self.key_size_sig = key_size_sig
+        self.salt_key_enc = salt_key_enc
+        self.salt_key_sig = salt_key_sig
+
+    @classmethod
+    def create_default(cls, enable_auth_key=False):
+        """ Create default settings for encryption key derivation from password.
+
+        original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+        :param bool enable_auth_key: generate a key for full data signatures via HMAC
+        :rtype: DerivedKeySetup
+        """
+        return cls(
+            ops=nacl.pwhash.argon2i.OPSLIMIT_SENSITIVE,
+            mem=nacl.pwhash.argon2i.MEMLIMIT_SENSITIVE,
+            construct='argon2i',
+            salt_key_enc=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES),
+            salt_key_sig=nacl.utils.random(nacl.pwhash.argon2i.SALTBYTES) if enable_auth_key else b'',
+            key_size_enc=nacl.secret.SecretBox.KEY_SIZE,
+            key_size_sig=64 if enable_auth_key else 0
+        )
 
 
 def create_keys_from_password(password, setup=None, enable_auth_key=False):
@@ -82,11 +108,12 @@ def create_keys_from_password(password, setup=None, enable_auth_key=False):
 
     Uses salt and resilient hashing. Returns the hashing settings, so the keys can be recreated with the same password.
     original source: https://pynacl.readthedocs.io/en/stable/password_hashing/#key-derivation
+
     :param bytes password: password as bytestring
     :param DerivedKeySetup setup: settings for the hashing
     :param bool enable_auth_key: generate a key for full data signatures via HMAC. Usually not necessary, as each block
         is automatically signed. The only danger is block loss and block order manipulation.
-    :rtype: DerivedKeys
+    :rtype: DerivedKey
     """
     setup = setup or DerivedKeySetup.create_default(enable_auth_key=enable_auth_key)
     kdf = None
@@ -128,6 +155,22 @@ class CryptoHandler:
         self.secret_key = secret_key
         self.auth_key = auth_key  # for signing
         self._last_signature = None
+
+    @classmethod
+    def from_random(cls, enable_auth_key=False):
+        key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+        auth_key = nacl.utils.random(size=64) if enable_auth_key else None
+        return cls(key, auth_key)
+
+    @classmethod
+    def from_derived_keys(cls, derived_key):
+        """ Create encryption and signature keys from a DerivedKey isntance.
+
+        :param DerivedKey derived_key: created via password and settings
+        :rtype: CryptoHandler
+        """
+        inst = cls(secret_key=derived_key.key_enc, auth_key=derived_key.key_sig or None)
+        return inst
 
     @property
     def last_signature(self):
@@ -303,6 +346,7 @@ class CryptoHandler:
         secret_key = keypair.decrypt(info['secret_key'])
         inst = cls(secret_key, auth_key)
         inst._last_signature = info['signature'].encode()
+        return inst
 
 
 def pubkey_from_string(pubkey_str):
@@ -434,3 +478,165 @@ def verify_bytesio(enc_message, verify_key_hex, signature):
     except BadSignatureError:
         return False
     return True
+
+
+def demo_asym_long():
+    import json
+    from io import BytesIO
+
+    # 1. create a file to be encrypted
+    # 2. create an asymmetric keypair to exchange the encryption keys
+    # 3. encrypt the file
+    # 4. provide the encryption info
+    # 5. decrypt
+
+    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
+
+    # load the keypair - public needed for encryption, private for decryption
+    keypair = AsymKeyPair(pubkey=pubkey_from_file(path_public_key))
+    # or: keypair = AsymKeyPair(pubkey=pubkey_from_string(pubkey_string))
+    # create CryptoHandler using throwaway keys. (alternative is derived key from password)
+    handler = CryptoHandler.from_random(enable_auth_key=True)
+    with open(path_to_encrypt + '.enc', 'wb') as f_out:
+        with open(path_to_encrypt, 'rb') as f_in:
+            for chunk in handler.encrypt_stream(f_in):
+                f_out.write(chunk)
+    # keypair is needed to encrypt the symmetric keys
+    enc_info = handler.create_info(keypair=keypair)
+    print(json.dumps(enc_info, indent=4))
+    # print the real keys for comparison
+    print('secret_key unencrypted:', binascii.hexlify(handler.secret_key).decode())
+    print('auth_key unencrypted:', binascii.hexlify(handler.auth_key).decode())
+    # delete all traces
+    del keypair
+    del handler
+    # decrypt
+    keypair = AsymKeyPair(privkey=privkey_from_pemfile(path_private_key))
+    handler = CryptoHandler.from_info(enc_info, keypair=keypair)
+    assert handler.last_signature is not None
+    buffer = BytesIO()
+    with open(path_to_encrypt + '.enc', 'rb') as f_in:
+        for chunk in handler.decrypt_stream(f_in, signature=handler.last_signature):
+            buffer.write(chunk)
+    buffer.seek(0)
+    decrypted = buffer.read().decode()
+    assert decrypted == 'The cake is a lie!\n' * 10000
+    import os
+    for path in [path_private_key, path_public_key, path_to_encrypt]:
+        os.remove(path)
+
+
+def demo_asym_short():
+    import json
+    from io import BytesIO
+    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
+    # encrypt, using generated symmetric keys and public key
+    keypair = AsymKeyPair(pubkey=pubkey_from_file(path_public_key))
+    with open(path_to_encrypt + '.enc', 'wb+') as f_out:
+        with open(path_to_encrypt, 'rb') as f_in:
+            # enable_auth_key is optional. Check create_keys_from_password for more info
+            for chunk in keypair.encrypt_stream(f_in, enable_auth_key=True):
+                f_out.write(chunk)
+        f_out.seek(0)
+        print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
+    # exchange only enc_info (JSONifiable)
+    enc_info = keypair.last_enc_info
+    del keypair
+    print(json.dumps(enc_info, indent=4))
+    # decrypt, using symmetric keys retrieved via private key
+    keypair = AsymKeyPair(privkey=privkey_from_pemfile(path_private_key))
+    buffer = BytesIO()  # use BytesIO instead of yet another file
+    with open(path_to_encrypt + '.enc', 'rb') as f_in:
+        for chunk in keypair.decrypt_stream(f_in, enc_info):
+            buffer.write(chunk)
+    buffer.seek(0)
+    decrypted = buffer.read().decode()
+    assert decrypted == 'The cake is a lie!\n' * 10000
+    import os
+    for path in [path_private_key, path_public_key, path_to_encrypt]:
+        os.remove(path)
+
+
+def _prepare_demo():
+    import os
+    import tempfile
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    # create temporary file and close
+    def _touch():
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        return path
+
+    # create file to encrypt
+    path_to_encrypt = _touch()
+    with open(path_to_encrypt, 'w') as f_out:
+        f_out.write('The cake is a lie!\n' * 10000)
+    # generate a keypair
+    asym_key = rsa.generate_private_key(
+        backend=default_backend(),
+        public_exponent=65537,
+        key_size=2048
+    )
+    path_private_key = _touch()
+    with open(path_private_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()
+            )
+        )
+    path_public_key = _touch()
+    with open(path_public_key, 'wb') as f_out:
+        f_out.write(
+            asym_key.public_key().public_bytes(
+                serialization.Encoding.OpenSSH,
+                serialization.PublicFormat.OpenSSH
+            )
+        )
+    return path_private_key, path_public_key, path_to_encrypt
+
+
+def demo_sym():
+    import os
+    from io import BytesIO
+    path_private_key, path_public_key, path_to_encrypt = _prepare_demo()
+    # we don't need the keypair
+    os.remove(path_private_key)
+    os.remove(path_public_key)
+    # pick any password
+    password = "supersecret".encode()
+    # enable_auth_key is optional
+    derived_keys = create_keys_from_password(password, enable_auth_key=True)
+    handler = CryptoHandler.from_derived_keys(derived_keys)
+    with open(path_to_encrypt + '.enc', 'wb+') as f_out:
+        with open(path_to_encrypt, 'rb') as f_in:
+            for chunk in handler.encrypt_stream(f_in):
+                f_out.write(chunk)
+        f_out.seek(0)
+        print('encrypted (first 20):', binascii.hexlify(f_out.read(20)).decode())
+    # store public information
+    signature = handler.last_signature  # for validation
+    key_setup = derived_keys.setup  # for key creation
+    # remove handler
+    del handler
+    del derived_keys
+    # decrypt
+    derived_keys = create_keys_from_password(
+        password, enable_auth_key=True, setup=key_setup)
+    handler = CryptoHandler.from_derived_keys(derived_keys)
+    buffer = BytesIO()  # use BytesIO instead of yet another file
+    with open(path_to_encrypt + '.enc', 'rb') as f_in:
+        for chunk in handler.decrypt_stream(f_in, signature=signature):
+            buffer.write(chunk)
+    buffer.seek(0)
+    decrypted = buffer.read().decode()
+    assert decrypted == 'The cake is a lie!\n' * 10000
+    os.remove(path_to_encrypt)
+
+
+if __name__ == '__main__':
+    demo_asym_long()
+    demo_asym_short()
+    demo_sym()
