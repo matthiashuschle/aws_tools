@@ -1,4 +1,4 @@
-from . import glacier_io, database, encryption
+from . import glacier_io, database
 
 
 class VaultManager:

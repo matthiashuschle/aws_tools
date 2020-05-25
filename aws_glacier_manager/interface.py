@@ -1,5 +1,7 @@
 import logging
 import pathlib
+from typing import Sequence
+from cryp_to_go.path_handler import AnyPath
 from . import local_cfg
 from . import datatypes
 
@@ -98,8 +100,8 @@ class ProjectInterface:
         self.project_dict[self.KEY_ROOT] = val
         self._update()
 
-    def db_add_files(self, filepaths):
-        self.db_project.add_files([pathlib.Path(x).absolute() for x in filepaths])
+    def db_add_files(self, filepaths: Sequence[AnyPath]):
+        return self.db_project.add_files(filepaths)
 
-    def db_remove_files(self, filepaths):
-        self.db_project.remove_files([pathlib.Path(x).absolute() for x in filepaths])
+    def db_remove_files(self, filepaths: Sequence[AnyPath]):
+        return self.db_project.remove_files(filepaths)

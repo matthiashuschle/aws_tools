@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import defaultdict
 from tempfile import TemporaryDirectory
+from cryp_to_go.path_handler import SubPath
 from .. import local_cfg
 from .. import database
 from .. import datatypes
@@ -175,73 +176,6 @@ class TestInventoryLog(DatabaseSetup):
         self.assertTrue(fill_id not in [x.request_id for x in open_requests])
 
 
-class TestDerivedKeySetup(TestCase):
-
-    def test_creation(self):
-        setup = datatypes.DerivedKeySetup.create_default()
-        self.assertIsNone(setup.row_id)
-        setup.key_size_sig = None
-        setup.salt_key_sig = None
-        self.assertIsNone(setup.key_size_sig)
-        self.assertIsNone(setup.salt_key_sig)
-        with datatypes.make_session() as session:
-            setup.create_db_entry(session)
-        # key is set
-        self.assertIsInstance(setup.row_id, int)
-        # default values are assigned
-        self.assertEqual(setup.key_size_sig, 0)
-        self.assertEqual(setup.salt_key_sig, b'')
-        with datatypes.make_session() as session:
-            setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=setup.row_id)
-        self.assertIsNotNone(setup_from_db)
-        self.assertIs(setup_from_db, setup)
-        
-    def test_update(self):
-        setup = datatypes.DerivedKeySetup.create_default()
-        self.assertIsNone(setup.row_id)
-        setup.key_size_sig = None
-        setup.salt_key_sig = None
-        with datatypes.make_session() as session:
-            setup.create_db_entry(session)
-        self.assertIsInstance(setup.row_id, int)
-        # default values are assigned
-        self.assertEqual(setup.key_size_sig, 0)
-        self.assertEqual(setup.salt_key_sig, b'')
-        # modify, update, and check
-        setup.key_size_sig = 42
-        setup.construct = 'foo'
-        old_id = setup.row_id
-        with datatypes.make_session() as session:
-            setup.update_db(session)
-        self.assertEqual(setup.row_id, old_id)
-        self.assertEqual(setup.key_size_sig, 42)
-        self.assertEqual(setup.salt_key_sig, b'')
-        self.assertEqual(setup.construct, 'foo')
-        # delete from cache and retrieve again
-        setup.clear_object_index()
-        with datatypes.make_session() as session:
-            setup_from_db = datatypes.DerivedKeySetup.from_db(session, row_id=old_id)
-        self.assertEqual(setup_from_db.key_size_sig, 42)
-        self.assertEqual(setup_from_db.salt_key_sig, b'')
-        self.assertEqual(setup_from_db.construct, 'foo')
-
-    def test_delete(self):
-        setup = datatypes.DerivedKeySetup.create_default()
-        with datatypes.make_session() as session:
-            setup.create_db_entry(session)
-            self.assertIsNotNone(setup.row_id)
-            old_id = setup.row_id
-            setup.remove_from_db(session)
-        self.assertTrue(setup.is_deleted)
-        self.assertIsNone(setup.row_id)
-        setup.key_size_sig = 5
-        with datatypes.make_session() as session:
-            with self.assertRaises(RuntimeError):
-                setup.update_db(session)
-            with self.assertRaises(datatypes.UnknownId):
-                datatypes.DerivedKeySetup.from_db(row_id=old_id, session=session)
-
-
 class TestChunk(TestCase):
 
     def test_creation(self):
@@ -398,6 +332,21 @@ class TestFile(DatabaseSetup):
             testfile.load_chunks(session)
         self.assertEqual(len(testfile.chunks), 0)
 
+    def test_from_subpath(self):
+        parent = '/foo'
+        subpath = SubPath.from_any_path('/foo/bar/baar', parent)
+        inst = datatypes.File.from_subpath(subpath, 0)
+        assert inst.path == 'bar'
+        assert inst.name == 'baar'
+        assert inst.slashed_string == 'bar/baar'
+        assert inst.local_path_relative == 'bar/baar'  # POSIX only
+        subpath = SubPath.from_any_path('/foo/baar', parent)
+        inst = datatypes.File.from_subpath(subpath, 0)
+        assert inst.path == ''
+        assert inst.name == 'baar'
+        assert inst.slashed_string == 'baar'
+        assert inst.local_path_relative == 'baar'  # POSIX only
+
 
 class TestProject(DatabaseSetup):
 
@@ -454,10 +403,11 @@ class TestProject(DatabaseSetup):
             Path(subsubdir)  # full subfolder
         ])
         self.assertEqual(len(project.files), 4)
+        print(list(project.files.keys()))
         assert project.files['foo1/bar11'].name == 'bar11'
         assert project.files['foo1/bar11'].path == 'foo1'
         assert project.files['bar01'].name == 'bar01'
-        assert project.files['bar01'].path == '.'
+        assert project.files['bar01'].path == ''
         assert project.files['foo1/foo3/bar31'].name == 'bar31'
         assert project.files['foo1/foo3/bar31'].path == 'foo1/foo3'
         assert project.files['foo1/foo3/bar32'].name == 'bar32'

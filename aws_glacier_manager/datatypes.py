@@ -2,16 +2,17 @@ import os
 import datetime
 from collections import OrderedDict, defaultdict
 import glob
-from typing import Union, List
+from typing import Union, Sequence, Optional
 from pathlib import Path
 import logging
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from itertools import chain
+from cryp_to_go import KeyDerivationSetup
+from cryp_to_go.path_handler import AnyPath, SubPath
 from . import database
 from .database import (make_session, TabProject, TabFile, TabDerivedKeySetup, TabChunk, 
                        TabInventoryRequest, TabInventoryResponse)
-from .encryption import DerivedKeySetup as DKS
 from sqlalchemy.sql.expression import null, func
 
 
@@ -233,13 +234,15 @@ class Project(MappedBase):
         loaded_files = {row.path: File.from_db(session, row=row) for row in file_rows}
         self.files.update(loaded_files)
 
-    def _get_folder_content(self, path: Path) -> List[Path]:
+    def _get_folder_content(self, path: SubPath) -> Sequence[AnyPath]:
         """ Get content of a single folder, excluding known files. """
-        content = [x for x in Path(self.base_path).joinpath(path).iterdir()
-                   if str(x.relative_to(self.base_path)) not in self.files]
+        content = [
+            x for x in path.absolute_path(self.base_path).iterdir()
+            if SubPath.from_any_path(x, self.base_path).slashed_string not in self.files
+        ]
         return content
 
-    def _add_file(self, path: Path) -> 'Union[File, None]':
+    def _add_file(self, path: SubPath) -> Optional["File"]:
         """ Add a single file.
 
         Returns None if it is already known.
@@ -248,34 +251,24 @@ class Project(MappedBase):
         :param str path: file path
         :rtype: File
         """
-        assert not path.is_absolute()
-        full_path = Path(self.base_path).joinpath(path)
-        if str(path) in self.files:
+        full_path = path.absolute_path(self.base_path)
+        if path.slashed_string in self.files:
             return None
         if not full_path.exists():
             raise FileNotFoundError
         if full_path.is_dir():
             raise IsADirectoryError
-        file = File(
-            name=path.name,
-            path=str(path.parent),
-            project_id=self.project_id,
-        )
+        file = File.from_subpath(path, self.project_id)
         file.set_size(self.base_path)
-        self.files[str(path)] = file
+        self.files[file.slashed_string] = file
         return file
 
-    def _to_relative_paths(self, paths: List[Path]) -> List[Path]:
+    def _to_relative_paths(self, paths: Sequence[AnyPath]) -> Sequence[SubPath]:
         """ Convert list of paths to relative to base_path. """
         assert self.base_path
-        for path in paths:
-            if '..' in path.parts:
-                raise OSError('can not handle ".." in path, might break due to symlinks: %s' % path)
-            if not len(path.name):
-                raise OSError('empty file name is illegal: %s' % path)
-        return [path.absolute().relative_to(self.base_path) for path in paths]
+        return [SubPath.from_any_path(x, self.base_path) for x in paths]
 
-    def add_files(self, paths: List[Path], session=None) -> List['File']:
+    def add_files(self, paths: Sequence[AnyPath], session=None) -> Sequence['File']:
         """ Add files given in list, including subdirectory content.
 
         Folders are not added, but their containing files are.
@@ -288,7 +281,7 @@ class Project(MappedBase):
                 try:
                     file = self._add_file(path)
                 except FileNotFoundError:
-                    logging.getLogger(__name__).warning('file not found: %s' % path)
+                    logging.getLogger(__name__).warning('file not found: %s' % path.absolute_path(self.base_path))
                     continue
                 except IsADirectoryError:
                     files.extend(self.add_files(
@@ -320,41 +313,35 @@ class Project(MappedBase):
                 file.remove_from_db(session)
         self.files = {x: y for x, y in self.files.items() if not y.is_deleted}
 
-    def remove_files(self, paths: List[Path], session=None):
+    def remove_files(self, paths: Sequence[AnyPath], session=None):
         """ Remove files. Acts like add_files, but removes them.
         """
         paths = self._to_relative_paths(paths)
         files_rel = {}
         for path in paths:
             print(path)
-            path_rel = str(path)
+            path_rel = path.slashed_string
             if path_rel in self.files:
                 files_rel[path_rel] = self.files[path_rel]
                 continue
             # could be folder
-            subcontent = {x: y for x, y in self.files.items() if self._path_contains(path, Path(y.path))}
+            subcontent = {x: y for x, y in self.files.items() if self._path_contains(path, y)}
             if not len(subcontent):
                 logging.getLogger(__name__).warning('file not found: %s' % path)
             else:
                 files_rel.update(subcontent)
         with make_session(session=session) as session:
-            for path_rel, file in files_rel.items():
+            for file in files_rel.values():
                 self._drop_file(file, session)
 
     @staticmethod
-    def _path_contains(parent: Path, child: Path) -> bool:
-        if parent == child:
-            return True
-        try:
-            child.relative_to(parent)
-            return True
-        except ValueError:
-            return False
+    def _path_contains(parent: SubPath, child: "File") -> bool:
+        return child.slashed_string.startswith(parent.slashed_string)
 
     def _drop_file(self, file, session):
         assert file.row_id in {x.row_id for x in self.files.values()}
         file.remove_from_db(session)
-        del self.files[str(file.path_obj)]
+        del self.files[file.slashed_string]
 
 
 class File(MappedBase):
@@ -377,6 +364,14 @@ class File(MappedBase):
         self.outdated = outdated
         # == end DB mapping
 
+    @classmethod
+    def from_subpath(cls, path: SubPath, project_id):
+        return cls(
+            name=path.relative_path.name,
+            path='/'.join(path.relative_path.parent.parts),
+            project_id=project_id,
+        )
+
     def update_dependencies(self, session):
         self.load_chunks(session)
         if self.is_deleted:
@@ -384,7 +379,7 @@ class File(MappedBase):
 
     def set_size(self, base_path):
         print(base_path, self.path, self.name)
-        self.size = get_file_size(os.path.join(base_path, self.path, self.name))
+        self.size = get_file_size(os.path.join(base_path, self.local_path_relative))
 
     @property
     def project(self):
@@ -404,8 +399,14 @@ class File(MappedBase):
                                 if x.file_id == self.file_id and not x.is_deleted})
 
     @property
-    def path_obj(self):
-        return Path(self.path).joinpath(Path(self.name))
+    def slashed_string(self) -> str:
+        if not self.path:
+            return self.name
+        return '/'.join([self.path, self.name])
+
+    @property
+    def local_path_relative(self) -> str:
+        return os.path.join(*self.path.split('/'), self.name)
 
     def load_chunks(self, session):
         if not self.file_id:
@@ -488,14 +489,16 @@ class Chunk(MappedBase):
         self.derived_key_setup = derived_key_setup
 
 
-class DerivedKeySetup(MappedBase, DKS):
+class DerivedKeySetup(MappedBase, KeyDerivationSetup):
 
     table_class = TabDerivedKeySetup
     optional_cols = [table_class.id_column, 'key_size_sig', 'salt_key_sig']
     required_cols = ['construct', 'ops', 'mem', 'key_size_enc', 'salt_key_enc']
 
     def __init__(self, *args, derived_key_setup_id=None, **kwargs):
-        super(DerivedKeySetup, self).__init__(*args, **kwargs)
+        # different signatures for base classes, call constructors explicitely
+        MappedBase.__init__(self)
+        KeyDerivationSetup.__init__(self, *args, **kwargs)
         # == begin DB mapping
         self.derived_key_setup_id = derived_key_setup_id
         # == end DB mapping

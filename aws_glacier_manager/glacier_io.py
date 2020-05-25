@@ -13,7 +13,7 @@ import base64
 import json
 import boto3
 from botocore.utils import calculate_tree_hash
-from .encryption import CryptoHandler
+from cryp_to_go import CryptoHandler
 
 
 # ToDo:
