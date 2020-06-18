@@ -8,7 +8,7 @@ class TestConfigInterface(TestCase):
     @LocalConfig.test_mode()
     def test_db_string(self):
         interface = LocalConfigInterface()
-        assert interface.db_string == LocalConfig._TEST_REMOTE_DB
+        assert interface.db_string == LocalConfig._TEST_DB
         interface.db_string = 'foo'
         assert interface.db_string == 'foo'
         if2 = LocalConfigInterface()
@@ -17,11 +17,11 @@ class TestConfigInterface(TestCase):
     @LocalConfig.test_mode()
     def test_default_vault(self):
         interface = LocalConfigInterface()
-        assert interface.default_vault == LocalConfig._TEST_DEFAULT_VAULT
-        interface.default_vault = 'foo'
-        assert interface.default_vault == 'foo'
+        assert interface.vault == LocalConfig._TEST_VAULT
+        interface.vault = 'foo'
+        assert interface.vault == 'foo'
         if2 = LocalConfigInterface()
-        assert if2.default_vault == 'foo'
+        assert if2.vault == 'foo'
 
 
 class TestProjectInterface(TestCase):

@@ -1,6 +1,8 @@
 from . import glacier_io, database
 
 
+# ToDo: obsolete?
+
 class VaultManager:
 
     def __init__(self, vault_name):

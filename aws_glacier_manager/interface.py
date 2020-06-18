@@ -1,5 +1,5 @@
+import os
 import logging
-import pathlib
 from typing import Sequence
 from cryp_to_go.path_handler import AnyPath
 from . import local_cfg
@@ -18,90 +18,87 @@ class LocalConfigInterface:
         return self._local_cfg
 
     @property
-    def db_string(self):
-        return self.local_cfg.remote_db
+    def db_string(self) -> str:
+        return self.local_cfg.database
 
     @db_string.setter
-    def db_string(self, val):
-        self.local_cfg.remote_db = val
+    def db_string(self, val: str):
+        if not len(val):
+            raise ValueError('empty string for database connector!')
+        self.local_cfg.database = val
         self.local_cfg.write_cfg_file()
 
     @property
-    def default_vault(self):
-        return self.local_cfg.default_vault
+    def vault(self) -> str:
+        return self.local_cfg.vault
 
-    @default_vault.setter
-    def default_vault(self, val):
-        self.local_cfg.default_vault = val
+    @vault.setter
+    def vault(self, val: str):
+        if not len(val):
+            raise ValueError('empty string for vault!')
+        self.local_cfg.vault = val
         self.local_cfg.write_cfg_file()
 
-    def get_project_status(self):
-        remote_projects = {x.name: x.vault for x in datatypes.get_overview()}
-        return self.local_cfg.local_projects, remote_projects
+    @property
+    def project(self) -> str:
+        return self.local_cfg.project
+
+    @project.setter
+    def project(self, val: str):
+        if not len(val):
+            raise ValueError('empty string for project name!')
+        self.project = val
+        self.local_cfg.write_cfg_file()
+
+    @staticmethod
+    def get_remote_project_status(db_string):
+        with local_cfg.LocalConfig.temporary_cfg(
+            db_string=db_string,
+        ):
+            remote_projects = {x.name: x.vault for x in datatypes.get_overview()}
+        return remote_projects
 
 
 class ProjectInterface:
 
-    KEY_ROOT = 'local_root'
-
     def __init__(self, name: str):
         self.name = name
-        self._local_cfg = local_cfg.LocalConfig()
-        self._project_dict = self._local_cfg.local_projects.get(name, {})
         self._db_project = None
+
+    @classmethod
+    def from_cfg(cls, cfg: LocalConfigInterface):
+        if not cfg.db_string:
+            raise ValueError('Project operations need a valid DB connector.')
+        project = cls(cfg.project)
+        # if no remote information (new project), vault is required
+        if not project.exists:
+            if not cfg.vault:
+                raise ValueError('New projects need to have a vault set.')
+            project.create_db_project()
+        return project
 
     @property
     def exists(self):
-        return bool(self.project_dict)
+        self.load_db_project()
+        return self._db_project is not None
 
-    def _update(self):
-        if not self.project_dict:
-            del self._local_cfg.local_projects[self.name]
-        else:
-            self._local_cfg.local_projects[self.name] = self.project_dict
-        self._local_cfg.write_cfg_file()
-
-    @property
-    def db_project(self):
-        assert self.local_root
-        if self._db_project is None:
-            obj = datatypes.Project.load_named(self.name)
-            if obj is None:
-                obj = datatypes.Project(name=self.name, vault=self._local_cfg.default_vault)
-                with datatypes.make_session() as session:
-                    obj.create_db_entry(session)
-            obj.base_path = self.local_root
-            self._db_project = obj
+    def load_db_project(self):
+        if self._db_project is not None:
+            return self._db_project
+        self._db_project = datatypes.Project.load_named(self.name)
         return self._db_project
 
-    @property
-    def project_dict(self):
-        return self._project_dict
-
-    @property
-    def local_root(self):
-        return self.project_dict.get(self.KEY_ROOT)
-
-    @local_root.setter
-    def local_root(self, val):
-        logger = logging.getLogger(__name__)
-        if not val:
-            if self.exists:
-                logger.info('deleting local project %s' % self.name)
-                self._project_dict = {}
-                self._update()
-            else:
-                logger.warning('empty local root path for new project -> ignoring')
-            return
-        if not self.exists:
-            logger.info('creating project %s' % self.name)
-        else:
-            logger.info('previous root path: %s' % str(self.local_root))
-        self.project_dict[self.KEY_ROOT] = val
-        self._update()
+    def create_db_project(self):
+        if self._db_project is not None:
+            raise RuntimeError('DB project already exists.')
+        obj = datatypes.Project(name=self.name, vault=self._local_cfg.vault)
+        with datatypes.make_session() as session:
+            obj.create_db_entry(session)
+        self._db_project = obj
+        return obj
 
     def db_add_files(self, filepaths: Sequence[AnyPath]):
-        return self.db_project.add_files(filepaths)
+        return self._db_project.add_files(filepaths)
 
     def db_remove_files(self, filepaths: Sequence[AnyPath]):
-        return self.db_project.remove_files(filepaths)
+        return self._db_project.remove_files(filepaths)

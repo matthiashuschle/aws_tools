@@ -14,6 +14,7 @@ import json
 import boto3
 from botocore.utils import calculate_tree_hash
 from cryp_to_go import CryptoHandler
+import cryp_to_go.core
 
 
 # ToDo:
@@ -121,7 +122,7 @@ class MultipartChunk:
                 if self.encrypted:
                     # we pipe the data through the encryptor, inflating due to signatures
                     data = BytesIO()
-                    unenc_block_size = self.crypto_handler.get_unenc_block_size(self.block_size)
+                    unenc_block_size = cryp_to_go.core.get_unenc_block_size(self.block_size)
                     for chunk in self.crypto_handler.encrypt_stream(f_in, unenc_block_size):
                         data.write(chunk)
                     data.seek(0)
@@ -170,7 +171,7 @@ class MultipartChunk:
         total_size = get_file_size(filepath)
         cur_position = 0
         # if encryption is used, the unencrypted block size must be used for input chunks
-        unenc_block_size = block_size if crypto_handler is None else crypto_handler.get_unenc_block_size(block_size)
+        unenc_block_size = block_size if crypto_handler is None else cryp_to_go.core.get_unenc_block_size(block_size)
         while cur_position <= total_size:
             end_pos = min(cur_position + unenc_block_size, total_size)
             chunks.append(cls(filepath, block_size, cur_position, end_pos - 1, crypto_handler=crypto_handler))

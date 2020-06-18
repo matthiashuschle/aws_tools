@@ -126,7 +126,7 @@ TabInventoryRequest.response = relationship('TabInventoryResponse', order_by=Tab
 class SessionContext:
 
     def __init__(self, connector_str=None):
-        connector_str = connector_str or local_cfg.LocalConfig().remote_db
+        connector_str = connector_str or local_cfg.LocalConfig().database
         self.engine = create_engine(connector_str)
         self.session_fac = sessionmaker(bind=self.engine)
 
@@ -160,5 +160,5 @@ def create_tables():
 
 def set_test():
     with local_cfg.LocalConfig.test_mode():
-        make_session.set_engine(local_cfg.LocalConfig().remote_db)
+        make_session.set_engine(local_cfg.LocalConfig().database)
         create_tables()
