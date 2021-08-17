@@ -9,8 +9,6 @@ setup(name='AWSGlacierManager',
       author_email='matthiashuschle@gmail.com',
       packages=['aws_glacier_manager'],
       install_requires=[
-          #'cryptography',
-          #'pynacl',
           'boto3',
           'pyyaml',
           'sqlalchemy',
