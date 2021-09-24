@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 def init_local():
+    """Create configuration for current working directory."""
     pass
 
 

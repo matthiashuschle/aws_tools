@@ -1,48 +1,128 @@
+from abc import ABC, abstractmethod
 from argparse import ArgumentParser
+from typing import Callable, Any, Dict
+from . import interface
 
 
-def main_init(args):
-    pass
+class SubCommand(ABC):
+
+    command: str
+    help_str: str
+    _register: Dict[str, "SubCommand"] = {}
+
+    @classmethod
+    def create_all_for(cls, subparsers):
+        for cmd in cls._register.values():
+            cmd.add_command(subparsers)
+
+    def __init_subclass__(cls, **kwargs):
+        cls._register[cls.command] = cls
+
+    @classmethod
+    def add_command(cls, subparsers):
+        command = subparsers.add_parser(cls.command, help=cls.help_str)
+        command.set_defaults(main_fcn=cls.main_fcn)
+        cls.add_arguments(command)
+
+    @classmethod
+    @abstractmethod
+    def main_fcn(cls, args):
+        pass
+
+    @classmethod
+    @abstractmethod
+    def add_arguments(cls, command):
+        pass
 
 
-def main_list(args):
-    pass
+class SubCommandInit(SubCommand):
+
+    command = "init"
+    help_str = "Initialize current directory as root for sync."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.init_local()
 
 
-def main_add(args):
-    pass
+class SubCommandList(SubCommand):
+
+    command = "list"
+    help_str = "Show files in inventory and sync status."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.list_files()
 
 
-def main_push(args):
-    pass
+class SubCommandAdd(SubCommand):
+
+    command = "add"
+    help_str = "Add files to inventory."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.add_files(files)
 
 
-def main_pull(args):
-    pass
+class SubCommandPush(SubCommand):
+
+    command = "push"
+    help_str = "Push missing chunks to vault."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.push_any()
 
 
-def main_push_inventory(args):
-    pass
+class SubCommandPull(SubCommand):
+
+    command = "pull"
+    help_str = "Pull missing chunks from vault."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.pull_any()
 
 
-SUBCOMMANDS = [
-        ("init", "Initialize current directory as root for sync.", main_init),
-        ("list", "Show files in inventory and sync status.", main_list),
-        ("add", "Add files to inventory.", main_add),
-        ("push", "Push missing chunks to vault.", main_push),
-        ("pull", "Pull missing chunks from vault.", main_pull),
-        ("push_inventory", "Push inventory to S3.", main_push_inventory),
-    ]
+class SubCommandPushInventory(SubCommand):
+
+    command = "push_inventory"
+    help_str = "Push inventory to S3."
+
+    @classmethod
+    def add_arguments(cls, command):
+        pass
+
+    @classmethod
+    def main_fcn(cls, args):
+        interface.push_inventory(s3_path)
 
 
 def get_parser():
     parser = ArgumentParser()
     subparsers = parser.add_subparsers()
-    commands = {}
-    for name, help_str, fcn in SUBCOMMANDS:
-        command = subparsers.add_parser(name, help=help_str)
-        command.set_defaults(main_fcn=fcn)
-        commands[name] = command
+    SubCommand.create_all_for(subparsers)
     return parser
 
 
